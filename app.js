@@ -5,6 +5,11 @@ const GAME_PROJECTS = Object.freeze([
   {id:'tkcarsurvival',name:'TKCarSurvival',platform:'TK'},
   {id:'pinrush',name:'pinrush',platform:'TK'}
 ]);
+const PERSONAL_GOALS = Object.freeze([
+  {id:'room',title:'收拾房间',hint:'收拾完成后，给自己勾一下。'},
+  {id:'trainerCertificate',title:'11 月考取健身教练证书',hint:'目标时间：2026 年 11 月'}
+]);
+const PUBLISHED_GAME_TARGET = 10;
 const paths = {
   sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/>',
   home:'<path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-8H9v8H4a1 1 0 0 1-1-1Z"/>',
@@ -55,12 +60,14 @@ const CHECKLIST = [
   {key:'game',icon:'game',name:'开发小游戏',hint:'推进了一小步，就算做过'}
 ];
 const blankDay = () => ({checks:{},energy:null,focus:{text:'',done:false},water:[],meals:{breakfast:false,lunch:false,dinner:false},exercise:[],sleep:null,supplements:[],skin:{am:false,pm:false},note:'',sessions:[]});
-const blankState = () => ({version:1,settings:{name:'',waterGoal:0,projectName:'我的第一个小游戏'},gameChecks:{},supplementPlan:[],tasks:[],days:{},timer:null});
+const blankState = () => ({version:1,settings:{name:'',waterGoal:0,projectName:'我的第一个小游戏'},gameChecks:{},goals:{room:false,trainerCertificate:false,publishedGames:0},supplementPlan:[],tasks:[],days:{},timer:null});
 function validateState(raw){
   if(!raw || raw.version!==1 || typeof raw.days!=='object' || !raw.days || Array.isArray(raw.days)) throw new Error('不是慢慢来的有效备份文件');
   const s=blankState(); const text=(v,n=300)=>typeof v==='string'?v.slice(0,n):'';
   const number=(v,min,max)=>typeof v==='number' && Number.isFinite(v) && v>=min && v<=max;
   for(const {id} of GAME_PROJECTS){if(typeof raw.gameChecks?.[id]==='boolean')s.gameChecks[id]=raw.gameChecks[id];}
+  for(const {id} of PERSONAL_GOALS)s.goals[id]=raw.goals?.[id]===true;
+  if(Number.isInteger(raw.goals?.publishedGames)&&number(raw.goals.publishedGames,0,PUBLISHED_GAME_TARGET))s.goals.publishedGames=raw.goals.publishedGames;
   s.settings={name:text(raw.settings?.name,30),waterGoal:number(raw.settings?.waterGoal,0,10000)?raw.settings.waterGoal:0,projectName:text(raw.settings?.projectName,80)||'我的第一个小游戏'};
   s.supplementPlan=(Array.isArray(raw.supplementPlan)?raw.supplementPlan:[]).slice(0,100).filter(x=>x&&typeof x.id==='string'&&x.name).map(x=>({id:text(x.id,100),name:text(x.name,50),note:text(x.note,120)}));
   s.tasks=(Array.isArray(raw.tasks)?raw.tasks:[]).slice(0,2000).filter(x=>x&&typeof x.id==='string'&&x.title).map(x=>({id:text(x.id,100),title:text(x.title,150),status:['todo','doing','done'].includes(x.status)?x.status:'todo',createdAt:text(x.createdAt,40)}));
@@ -86,7 +93,7 @@ let state, storageBlocked=false, initialError='',rawBackup='';
 try{rawBackup=localStorage.getItem(STORAGE_KEY)||'';state=rawBackup?validateState(JSON.parse(rawBackup)):blankState();}catch(error){state=blankState();storageBlocked=true;initialError='无法读取本地记录。请先在设置中导出原始备份，再恢复数据。';}
 let selectedDate=localDate();
 let currentCalendarDate=localDate();
-let view=['today','history','projects','settings'].includes(location.hash.slice(1))?location.hash.slice(1):'today';
+let view=['today','history','projects','goals','settings'].includes(location.hash.slice(1))?location.hash.slice(1):'today';
 let timerPreset=15,toastTimeout,detailRecordsOpen=false,projectDetailsOpen=!!state.timer;
 const main=document.querySelector('#main'),dialog=document.querySelector('#dialog');
 function day(key=selectedDate){if(!state.days[key])state.days[key]=blankDay();return state.days[key];}
@@ -97,7 +104,7 @@ function save(){
 }
 function setSaved(message,error=false){document.querySelector('#saved-state').innerHTML=`<i style="${error?'background:#c99b78':''}"></i>${esc(message)}`;}
 function toast(message){const el=document.querySelector('#toast');el.textContent=message;el.classList.add('show');clearTimeout(toastTimeout);toastTimeout=setTimeout(()=>el.classList.remove('show'),3000);}
-const navItems=[['today','home','今日'],['history','chart','回顾'],['projects','game','小游戏'],['settings','settings','设置']];
+const navItems=[['today','home','今日'],['goals','star','目标'],['history','chart','回顾'],['projects','game','小游戏'],['settings','settings','设置']];
 function renderNav(){
   const navHtml=mobile=>navItems.map(([key,i,label])=>`<button class="${mobile?'':'nav-button '}${view===key?'active':''}" data-action="nav" data-view="${key}" ${view===key?'aria-current="page"':''}>${icon(i)}<span>${label}</span></button>`).join('');
   document.querySelector('#nav').innerHTML=navHtml(false);document.querySelector('#mobile-nav').innerHTML=navHtml(true);
@@ -105,7 +112,7 @@ function renderNav(){
   document.querySelector('#settings-icon').innerHTML=icon('settings');
   document.querySelector('#profile-name').textContent=state.settings.name||'我的小天地';document.querySelector('#avatar').textContent=state.settings.name?.slice(0,1)||'我';
 }
-function render(){renderNav();main.innerHTML=({today:renderToday,history:renderHistory,projects:renderProjects,settings:renderSettings})[view]();if(storageBlocked)setSaved('保存暂停，请先导出备份',true);}
+function render(){renderNav();main.innerHTML=({today:renderToday,history:renderHistory,projects:renderProjects,goals:renderGoals,settings:renderSettings})[view]();if(storageBlocked)setSaved('保存暂停，请先导出备份',true);}
 function refreshDailyDate(){
   const now=localDate();if(now===currentCalendarDate||dialog.open)return;
   const previous=currentCalendarDate;currentCalendarDate=now;
@@ -152,6 +159,7 @@ function renderToday(){
     renderChecklist(d)+
     `<section class="welcome-grid" aria-label="每日问候">${renderActionPeriod()}<div class="energy-card"><h2 class="small-heading">${icon('sun')} 今天的能量</h2><p class="hint">按现在的感觉选就好</p><div class="energy-options">${[['low','◔','轻一点'],['steady','◑','刚刚好'],['good','☀','有余力']].map(([key,sign,name])=>`<button class="energy-option ${d.energy===key?'selected':''}" data-action="energy" data-key="${key}" aria-pressed="${d.energy===key}"><span aria-hidden="true">${sign}</span>${name}</button>`).join('')}</div><p class="energy-note">${d.energy?energyText[d.energy]:'每一种状态，都值得被照顾。'}</p></div></section>
     <section class="focus-card" aria-label="今日重点"><div class="focus-badge">${icon(d.focus.done?'check':'star')}</div><div class="focus-details"><div class="focus-eyebrow">${d.focus.done?'今天有了一个小进展':'今日重点 · 一件就好'}</div><h3 class="${d.focus.done?'done':''}">${esc(d.focus.text||'今天，你想把精力留给什么？')}</h3></div><button class="text-button" data-action="focus-edit" aria-label="${d.focus.text?'修改今日重点':'设置今日重点'}">${icon('edit')}${d.focus.text?'修改':''}</button><button class="primary-button" data-action="${d.focus.text?'focus-toggle':'focus-edit'}">${icon(d.focus.done?'undo':d.focus.text?'check':'plus')}${d.focus.done?'撤销完成':d.focus.text?'做好了':'选一件事'}</button></section>
+    ${renderGoalsPreview()}
     <details class="optional-records" id="optional-records" ${detailRecordsOpen?'open':''}><summary><span>详细记录（可选）<small>时长、饮水量和日常明细</small></span>${icon('right')}</summary><p class="optional-help">想记得更细时再填写。新增明细会勾选对应事项；取消勾选会保留已有明细。</p><section aria-label="日常明细"><div class="habit-grid">
       <article class="habit-card water">${cardHeader('water','喝点水','STAY HYDRATED',`<button class="text-button" data-action="water-edit">记录</button>`)}<div class="card-stat">${w.toLocaleString()}<small>ml${goal?` / ${goal.toLocaleString()}`:''}</small></div>${goal?`<div class="water-progress" role="progressbar" aria-label="自定饮水目标" aria-valuenow="${w}" aria-valuemin="0" aria-valuemax="${Math.max(w,goal)}"><span style="width:${Math.min(100,w/goal*100)}%"></span></div>`:`<div class="water-dots" aria-hidden="true">${Array.from({length:8},(_,i)=>`<i class="${w>i*250?'filled':''}"></i>`).join('')}</div>`}<div class="card-note">${goal?'按自己设置的目标记录':'今天的饮水记录'}</div><div class="card-actions"><button class="secondary-button" data-action="water-add" data-amount="250">${icon('plus')}250 ml</button><button class="icon-button" data-action="water-undo" aria-label="撤销上一笔饮水记录" ${d.water.length?'':'disabled'}>${icon('undo')}</button></div></article>
       <article class="habit-card meals">${cardHeader('meal','好好吃饭','NOURISH YOURSELF')}<div class="subtle-stat">${mealCount?`记下了 ${mealCount} 餐`:'记得给自己一餐'}</div><div class="check-options">${[['breakfast','早餐'],['lunch','午餐'],['dinner','晚餐']].map(([k,n])=>checkChip('meal',k,n,d.meals[k])).join('')}</div><div class="card-note" style="margin-top:auto;padding-top:14px">吃过了，就轻轻记一下。</div></article>
@@ -163,6 +171,27 @@ function renderToday(){
     <section class="bottom-grid"><article class="project-preview"><div class="project-top"><h2 class="project-title">${icon('game')} 做一点小游戏</h2><button class="text-button" data-action="nav" data-view="projects">进入项目 ${icon('arrow')}</button></div><h3>TK · 小游戏</h3><p class="project-next">${GAME_PROJECTS.map(p=>p.name).join(' · ')}</p><div class="project-meta"><span>已完成 ${completedGames()} / ${GAME_PROJECTS.length} 个小游戏</span><span>${isToday?'今日':'当日'}专注 ${minutes(d)} 分钟</span></div></article><article class="journal-card"><div class="project-top"><h2 class="project-title">${icon('journal')} 留一句给自己</h2><span class="hint">随手记</span></div><label class="visually-hidden" for="daily-note">当天随手记</label><textarea id="daily-note" maxlength="3000" placeholder="今天有什么小小的开心？\n或者，只写一句“今天辛苦了”。">${esc(d.note)}</textarea><div class="journal-bottom"><span id="note-status">输入后自动保存</span><span id="note-count">${d.note.length} / 3000</span></div></article></section>`;
 }
 function recentDays(){return Array.from({length:7},(_,i)=>shiftDate(localDate(),i-6));}
+const completedGoals=()=>PERSONAL_GOALS.filter(g=>state.goals[g.id]).length+(state.goals.publishedGames===PUBLISHED_GAME_TARGET?1:0);
+function renderGoalsPreview(){
+  return `<section class="goals-preview" aria-label="我的目标概览"><div class="section-title"><h2>${icon('star')} 我的目标</h2><button class="text-button" data-action="nav" data-view="goals">查看目标 ${icon('arrow')}</button></div><div class="goals-preview-items">${PERSONAL_GOALS.map(g=>`<div class="goal-preview-item"><span>${g.title}</span><small>${state.goals[g.id]?'已完成':'进行中'}</small></div>`).join('')}<div class="goal-preview-item"><span>小游戏上架 10 个</span><small>${state.goals.publishedGames} / ${PUBLISHED_GAME_TARGET}</small></div></div></section>`;
+}
+function renderGoals(){
+  const n=state.goals.publishedGames,done=n===PUBLISHED_GAME_TARGET;
+  return titleBlock('给想做的事，留一个位置','一次推进一点，完成后记下来。')+`<section class="goals-panel" aria-label="个人目标"><div class="section-title"><div><h2>我的目标</h2><p class="checklist-hint">进度长期保存，可以随时调整。</p></div><span id="goals-summary" role="status" aria-live="polite">已完成 ${completedGoals()} / 3</span></div><div class="goals-list">${PERSONAL_GOALS.map(g=>`<label class="checklist-row ${state.goals[g.id]?'checked':''}"><input type="checkbox" data-goal-check="${g.id}" aria-label="${g.title}" ${state.goals[g.id]?'checked':''}><span class="checklist-copy"><strong>${g.title}</strong><small>${g.hint}</small></span><span class="checklist-state">${state.goals[g.id]?'已完成':'勾选完成'}</span></label>`).join('')}<article class="goal-count-card ${done?'checked':''}" id="published-games-card"><div class="goal-count-heading"><div><h3>小游戏上架 10 个</h3><p class="checklist-hint">每上架一个记一笔，数量可调整。</p></div><span class="goal-completion" id="published-games-status">${done?'已完成':'进行中'}</span></div><div class="goal-count-controls"><button type="button" class="secondary-button" data-action="goal-count-down" aria-label="减少一个已上架小游戏" ${n===0?'disabled':''}>−</button><div class="goal-count-value"><label class="visually-hidden" for="published-games-count">已上架小游戏数量</label><input id="published-games-count" type="number" min="0" max="10" step="1" inputmode="numeric" value="${n}"><span>/ 10 个</span></div><button type="button" class="secondary-button" data-action="goal-count-up" aria-label="增加一个已上架小游戏" ${done?'disabled':''}>${icon('plus')}上架一个</button></div><progress id="published-games-progress" value="${n}" max="10" aria-label="小游戏上架进度，已上架 ${n} 个，共 10 个"></progress><p class="goal-count-note" id="published-games-note" role="status" aria-live="polite">${done?'10 个已上架，目标完成。':'已上架 '+n+' 个，还差 '+(10-n)+' 个。'}</p></article></div></section>`+renderActionPeriod(true);
+}
+function updateGoalSummary(){const summary=document.querySelector('#goals-summary');if(summary)summary.textContent=`已完成 ${completedGoals()} / 3`;}
+function setPublishedGames(value){
+  if(!Number.isInteger(value)||value<0||value>PUBLISHED_GAME_TARGET){document.querySelector('#published-games-count').value=state.goals.publishedGames;toast('请输入 0 到 10 之间的整数');return;}
+  state.goals.publishedGames=value;save();
+  const done=value===PUBLISHED_GAME_TARGET;
+  document.querySelector('#published-games-count').value=value;
+  document.querySelector('#published-games-card').classList.toggle('checked',done);
+  document.querySelector('#published-games-status').textContent=done?'已完成':'进行中';
+  document.querySelector('[data-action="goal-count-down"]').disabled=value===0;
+  document.querySelector('[data-action="goal-count-up"]').disabled=done;
+  const progress=document.querySelector('#published-games-progress');progress.value=value;progress.setAttribute('aria-label',`小游戏上架进度，已上架 ${value} 个，共 10 个`);
+  document.querySelector('#published-games-note').textContent=done?'10 个已上架，目标完成。':`已上架 ${value} 个，还差 ${10-value} 个。`;updateGoalSummary();
+}
 function renderHistory(){
   const dates=recentDays(),records=dates.map(k=>state.days[k]),count=records.filter(hasRecord).length,focus=records.filter(d=>d?.focus.done).length,total=records.reduce((a,d)=>a+(d?minutes(d):0),0),all=Object.keys(state.days).filter(k=>hasRecord(state.days[k])).sort().reverse();
   return titleBlock('回头看看，已经走了一点','每一笔记录，都是照顾自己的痕迹。')+
@@ -205,6 +234,8 @@ function downloadBackup(){const contents=storageBlocked&&rawBackup?rawBackup:JSO
 document.addEventListener('click',event=>{
   const b=event.target.closest('[data-action]');if(!b||b.disabled)return;const action=b.dataset.action,id=b.dataset.id,key=b.dataset.key;const d=day();
   switch(action){
+    case 'goal-count-down':setPublishedGames(state.goals.publishedGames-1);return;
+    case 'goal-count-up':setPublishedGames(state.goals.publishedGames+1);return;
     case 'nav':navigate(b.dataset.view);return;
     case 'dialog-close':dialog.close();pendingConfirm=null;pendingImport=null;return;
     case 'confirm':{const fn=pendingConfirm;pendingConfirm=null;dialog.close();fn?.();return;}
@@ -254,6 +285,12 @@ document.addEventListener('input',event=>{
 });
 document.addEventListener('change',async event=>{
   const el=event.target;
+  if(el.dataset.goalCheck){
+    const key=el.dataset.goalCheck;if(!PERSONAL_GOALS.some(g=>g.id===key))return;
+    state.goals[key]=el.checked;save();
+    const row=el.closest('.checklist-row');row.classList.toggle('checked',el.checked);row.querySelector('.checklist-state').textContent=el.checked?'已完成':'勾选完成';updateGoalSummary();return;
+  }
+  if(el.id==='published-games-count'){setPublishedGames(el.value===''?NaN:Number(el.value));return;}
   if(el.dataset.gameCheck){
     const key=el.dataset.gameCheck;if(!GAME_PROJECTS.some(p=>p.id===key))return;
     state.gameChecks[key]=el.checked;save();
@@ -270,7 +307,7 @@ document.addEventListener('change',async event=>{
   if(el.dataset.taskStatus){const task=state.tasks.find(x=>x.id===el.dataset.taskStatus);if(task){if(task.status!=='done'&&el.value==='done')day(localDate()).checks.game=true;task.status=el.value;save();render();}}
   if(el.id==='import-file'){
     const file=el.files[0];el.value='';if(!file)return;
-    try{if(file.size>5*1024*1024)throw new Error('文件超过 5 MB，请选择较小的备份');pendingImport=validateState(JSON.parse(await file.text()));openDialog('恢复这份备份？',`<p class="dialog-help">文件：${esc(file.name)}<br>包含 ${Object.values(pendingImport.days).filter(hasRecord).length} 天记录、${pendingImport.tasks.length} 个项目步骤。</p><div class="info-box">导入会替换当前设备的记录，专注计时会停止。点击恢复时会先下载一份现有数据备份。</div><div class="dialog-actions"><button class="secondary-button" data-action="dialog-close">取消</button><button class="primary-button" data-action="import-apply">备份现有数据并恢复</button></div>`);}catch(error){pendingImport=null;toast('未导入：'+(error instanceof SyntaxError?'文件不是有效的 JSON 备份':error.message));}
+    try{if(file.size>5*1024*1024)throw new Error('文件超过 5 MB，请选择较小的备份');pendingImport=validateState(JSON.parse(await file.text()));openDialog('恢复这份备份？',`<p class="dialog-help">文件：${esc(file.name)}<br>包含 ${Object.values(pendingImport.days).filter(hasRecord).length} 天记录、${pendingImport.tasks.length} 个项目步骤，目标进度也会一并恢复。</p><div class="info-box">导入会替换当前设备的记录，专注计时会停止。点击恢复时会先下载一份现有数据备份。</div><div class="dialog-actions"><button class="secondary-button" data-action="dialog-close">取消</button><button class="primary-button" data-action="import-apply">备份现有数据并恢复</button></div>`);}catch(error){pendingImport=null;toast('未导入：'+(error instanceof SyntaxError?'文件不是有效的 JSON 备份':error.message));}
   }
 });
 document.addEventListener('submit',event=>{
