@@ -10,7 +10,16 @@ const PERSONAL_GOALS = Object.freeze([
   {id:'trainerCertificate',title:'11 月考取健身教练证书',hint:'目标时间：2026 年 11 月'}
 ]);
 const PUBLISHED_GAME_TARGET = 10;
+const EXPENSE_CATEGORIES = Object.freeze([
+  {id:'home',name:'房租 / 居住'}, {id:'food',name:'吃饭 / 饮食'},
+  {id:'transport',name:'交通'}, {id:'daily',name:'日用品'},
+  {id:'health',name:'健身 / 健康'}, {id:'games',name:'小游戏开发'},
+  {id:'subscription',name:'订阅 / 通讯'}, {id:'other',name:'其他'}
+]);
+const MAX_EXPENSE_CENTS = 99999999;
+const MAX_EXPENSES = 10000;
 const paths = {
+  wallet:'<path d="M3 6h17v14H3V6Zm0 0V4h14v2M16 11h5v5h-5z"/><path d="M18 13.5h.01"/>',
   sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/>',
   home:'<path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-8H9v8H4a1 1 0 0 1-1-1Z"/>',
   chart:'<path d="M4 4v16h17M8 15v-4m5 4V7m5 8v-6"/>',
@@ -59,12 +68,33 @@ const CHECKLIST = [
   {key:'water',icon:'water',name:'喝水',hint:'记得喝过水，就轻轻勾一下'},
   {key:'game',icon:'game',name:'开发小游戏',hint:'推进了一小步，就算做过'}
 ];
+function parseExpenseAmount(input){
+  if(typeof input!=='string'||!/^\d+(?:\.\d{1,2})?$/.test(input.trim()))return null;
+  const [whole,fraction='']=input.trim().split('.');
+  const cents=Number(whole)*100+Number(fraction.padEnd(2,'0'));
+  return Number.isSafeInteger(cents)&&cents>=1&&cents<=MAX_EXPENSE_CENTS?cents:null;
+}
+const formatMoney=cents=>'¥'+(cents/100).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
+const validMonth=month=>typeof month==='string'&&/^20\d{2}-(0[1-9]|1[0-2])$/.test(month);
+function shiftMonth(month,delta){
+  if(!validMonth(month)||!Number.isInteger(delta))return null;
+  const [year,m]=month.split('-').map(Number),index=Math.max(2000*12,Math.min(2099*12+11,year*12+m-1+delta));
+  return `${Math.floor(index/12)}-${String(index%12+1).padStart(2,'0')}`;
+}
 const blankDay = () => ({checks:{},energy:null,focus:{text:'',done:false},water:[],meals:{breakfast:false,lunch:false,dinner:false},exercise:[],sleep:null,supplements:[],skin:{am:false,pm:false},note:'',sessions:[]});
-const blankState = () => ({version:1,settings:{name:'',waterGoal:0,projectName:'我的第一个小游戏'},gameChecks:{},goals:{room:false,trainerCertificate:false,publishedGames:0},supplementPlan:[],tasks:[],days:{},timer:null});
+const blankState = () => ({version:1,settings:{name:'',waterGoal:0,projectName:'我的第一个小游戏'},gameChecks:{},goals:{room:false,trainerCertificate:false,publishedGames:0},expenses:[],supplementPlan:[],tasks:[],days:{},timer:null});
 function validateState(raw){
   if(!raw || raw.version!==1 || typeof raw.days!=='object' || !raw.days || Array.isArray(raw.days)) throw new Error('不是慢慢来的有效备份文件');
   const s=blankState(); const text=(v,n=300)=>typeof v==='string'?v.slice(0,n):'';
   const number=(v,min,max)=>typeof v==='number' && Number.isFinite(v) && v>=min && v<=max;
+  if(raw.expenses!==undefined){
+    if(!Array.isArray(raw.expenses)||raw.expenses.length>MAX_EXPENSES)throw new Error('花销记录格式无效或超过 10000 笔');
+    const expenseIds=new Set();
+    s.expenses=raw.expenses.map(x=>{
+      if(!x||typeof x.id!=='string'||!x.id.trim()||x.id.length>100||expenseIds.has(x.id)||!validDate(x.date)||x.date<'2000-01-01'||x.date>'2099-12-31'||typeof x.title!=='string'||!x.title.trim()||x.title.length>80||!Number.isSafeInteger(x.amountCents)||x.amountCents<1||x.amountCents>MAX_EXPENSE_CENTS||!EXPENSE_CATEGORIES.some(c=>c.id===x.category)||(x.note!==undefined&&(typeof x.note!=='string'||x.note.length>300)))throw new Error('花销记录包含无效日期、金额或重复编号，请检查备份');
+      expenseIds.add(x.id);return {id:x.id,date:x.date,title:x.title.trim(),amountCents:x.amountCents,category:x.category,note:x.note||''};
+    });
+  }
   for(const {id} of GAME_PROJECTS){if(typeof raw.gameChecks?.[id]==='boolean')s.gameChecks[id]=raw.gameChecks[id];}
   for(const {id} of PERSONAL_GOALS)s.goals[id]=raw.goals?.[id]===true;
   if(Number.isInteger(raw.goals?.publishedGames)&&number(raw.goals.publishedGames,0,PUBLISHED_GAME_TARGET))s.goals.publishedGames=raw.goals.publishedGames;
@@ -92,8 +122,9 @@ function validateState(raw){
 let state, storageBlocked=false, initialError='',rawBackup='';
 try{rawBackup=localStorage.getItem(STORAGE_KEY)||'';state=rawBackup?validateState(JSON.parse(rawBackup)):blankState();}catch(error){state=blankState();storageBlocked=true;initialError='无法读取本地记录。请先在设置中导出原始备份，再恢复数据。';}
 let selectedDate=localDate();
+let selectedExpenseMonth=localDate().slice(0,7);
 let currentCalendarDate=localDate();
-let view=['today','history','projects','goals','settings'].includes(location.hash.slice(1))?location.hash.slice(1):'today';
+let view=['today','history','projects','goals','expenses','settings'].includes(location.hash.slice(1))?location.hash.slice(1):'today';
 let timerPreset=15,toastTimeout,detailRecordsOpen=false,projectDetailsOpen=!!state.timer;
 const main=document.querySelector('#main'),dialog=document.querySelector('#dialog');
 function day(key=selectedDate){if(!state.days[key])state.days[key]=blankDay();return state.days[key];}
@@ -104,7 +135,7 @@ function save(){
 }
 function setSaved(message,error=false){document.querySelector('#saved-state').innerHTML=`<i style="${error?'background:#c99b78':''}"></i>${esc(message)}`;}
 function toast(message){const el=document.querySelector('#toast');el.textContent=message;el.classList.add('show');clearTimeout(toastTimeout);toastTimeout=setTimeout(()=>el.classList.remove('show'),3000);}
-const navItems=[['today','home','今日'],['goals','star','目标'],['history','chart','回顾'],['projects','game','小游戏'],['settings','settings','设置']];
+const navItems=[['today','home','今日'],['goals','star','目标'],['expenses','wallet','花销'],['history','chart','回顾'],['projects','game','小游戏'],['settings','settings','设置']];
 function renderNav(){
   const navHtml=mobile=>navItems.map(([key,i,label])=>`<button class="${mobile?'':'nav-button '}${view===key?'active':''}" data-action="nav" data-view="${key}" ${view===key?'aria-current="page"':''}>${icon(i)}<span>${label}</span></button>`).join('');
   document.querySelector('#nav').innerHTML=navHtml(false);document.querySelector('#mobile-nav').innerHTML=navHtml(true);
@@ -112,7 +143,7 @@ function renderNav(){
   document.querySelector('#settings-icon').innerHTML=icon('settings');
   document.querySelector('#profile-name').textContent=state.settings.name||'我的小天地';document.querySelector('#avatar').textContent=state.settings.name?.slice(0,1)||'我';
 }
-function render(){renderNav();main.innerHTML=({today:renderToday,history:renderHistory,projects:renderProjects,goals:renderGoals,settings:renderSettings})[view]();if(storageBlocked)setSaved('保存暂停，请先导出备份',true);}
+function render(){renderNav();main.innerHTML=({today:renderToday,history:renderHistory,projects:renderProjects,goals:renderGoals,expenses:renderExpenses,settings:renderSettings})[view]();if(storageBlocked)setSaved('保存暂停，请先导出备份',true);}
 function refreshDailyDate(){
   const now=localDate();if(now===currentCalendarDate||dialog.open)return;
   const previous=currentCalendarDate;currentCalendarDate=now;
@@ -192,6 +223,38 @@ function setPublishedGames(value){
   const progress=document.querySelector('#published-games-progress');progress.value=value;progress.setAttribute('aria-label',`小游戏上架进度，已上架 ${value} 个，共 10 个`);
   document.querySelector('#published-games-note').textContent=done?'10 个已上架，目标完成。':`已上架 ${value} 个，还差 ${10-value} 个。`;updateGoalSummary();
 }
+function expensesForMonth(month){return state.expenses.filter(x=>x.date.slice(0,7)===month).sort((a,b)=>b.date.localeCompare(a.date));}
+function renderExpenses(){
+  const rows=expensesForMonth(selectedExpenseMonth),total=rows.reduce((sum,x)=>sum+x.amountCents,0);
+  const [year,month]=selectedExpenseMonth.split('-'),label=`${year} 年 ${Number(month)} 月`;
+  const categories=EXPENSE_CATEGORIES.map(c=>({...c,total:rows.filter(x=>x.category===c.id).reduce((sum,x)=>sum+x.amountCents,0)})).filter(c=>c.total>0).sort((a,b)=>b.total-a.total);
+  return titleBlock('花出去的，轻轻记下来','一笔一笔记录，看看每个月花在哪里。',`<button class="primary-button expense-add-button" data-action="expense-add">${icon('plus')}记一笔</button>`)+
+    `<section class="expense-overview" aria-label="月度花销汇总"><div class="expense-month-controls"><button class="icon-button" data-action="expense-month-prev" aria-label="上个月" ${selectedExpenseMonth==='2000-01'?'disabled':''}>${icon('left')}</button><label class="visually-hidden" for="expense-month">花销月份</label><input id="expense-month" type="month" min="2000-01" max="2099-12" value="${selectedExpenseMonth}"><button class="icon-button" data-action="expense-month-next" aria-label="下个月" ${selectedExpenseMonth==='2099-12'?'disabled':''}>${icon('right')}</button><button class="text-button" data-action="expense-month-today">本月</button></div><div class="expense-total"><div><p>${label} · 总花销</p><strong aria-label="当月总花销">${formatMoney(total)}</strong></div><span>共 ${rows.length} 笔记录</span></div></section>
+    <div class="expense-layout"><section class="panel expense-records" aria-label="花销明细"><div class="section-title"><h2>这个月的明细</h2><span>按日期排列</span></div>${rows.length?`<div class="expense-list">${rows.map(x=>`<article class="expense-row"><div class="expense-row-main"><div class="expense-row-heading"><h3>${esc(x.title)}</h3><strong>${formatMoney(x.amountCents)}</strong></div><p class="expense-meta"><time datetime="${x.date}">${x.date.replaceAll('-','/')}</time><span>${esc(EXPENSE_CATEGORIES.find(c=>c.id===x.category).name)}</span></p>${x.note?`<p class="expense-note">${esc(x.note)}</p>`:''}</div><div class="expense-row-actions"><button class="icon-button" data-action="expense-edit" data-id="${esc(x.id)}" aria-label="编辑花销：${esc(x.title)}">${icon('edit')}</button><button class="icon-button" data-action="expense-delete" data-id="${esc(x.id)}" aria-label="删除花销：${esc(x.title)}">${icon('trash')}</button></div></article>`).join('')}</div>`:`<div class="empty-state">${icon('wallet')}<h3>这个月还没有记录</h3><p>房租、一顿饭、一次订阅，都可以记在这里。</p><button class="secondary-button" data-action="expense-add">${icon('plus')}记下第一笔</button></div>`}</section>
+    <aside class="panel expense-categories" aria-label="花销分类汇总"><h2 class="panel-title">花在哪里</h2>${categories.length?`<ul>${categories.map(c=>`<li><div><span>${c.name}</span><strong>${formatMoney(c.total)}</strong></div><progress value="${c.total}" max="${total}" aria-label="${c.name}，${formatMoney(c.total)}"></progress></li>`).join('')}</ul>`:'<p class="hint">记下花销后，这里会按分类汇总。</p>'}</aside></div><p class="expense-storage-note">金额单位：人民币元。记录保存在当前浏览器，可在「设置」导出备份。</p>`;
+}
+function expenseDialog(id){
+  const record=id?state.expenses.find(x=>x.id===id):null;
+  if(id&&!record){toast('这笔花销已不存在');return;}
+  if(!record&&state.expenses.length>=MAX_EXPENSES){toast('花销已达 10000 笔，请先导出备份整理记录');return;}
+  const date=record?.date||(selectedExpenseMonth===localDate().slice(0,7)?localDate():selectedExpenseMonth+'-01');
+  openDialog(record?'编辑这笔花销':'记下一笔花销',`<form id="expense-form" data-id="${esc(record?.id||'')}"><p class="dialog-help">按实际支付日期记录，金额单位为人民币元。</p><label class="field"><span>花销项目</span><input name="title" required maxlength="80" value="${esc(record?.title||'')}" placeholder="例如：房租、晚饭、软件订阅" autofocus></label><div class="field-row"><label class="field"><span>金额（元）</span><input name="amount" type="text" inputmode="decimal" required maxlength="12" value="${record?(record.amountCents/100).toFixed(2):''}" placeholder="0.00" autocomplete="off"></label><label class="field"><span>花销日期</span><input name="date" type="date" required min="2000-01-01" max="2099-12-31" value="${date}"></label></div><label class="field"><span>分类</span><select name="category">${EXPENSE_CATEGORIES.map(c=>`<option value="${c.id}" ${(record?.category||'other')===c.id?'selected':''}>${c.name}</option>`).join('')}</select></label><label class="field"><span>备注（可选）</span><textarea name="note" maxlength="300" rows="2" placeholder="想补充的内容，可以留在这里">${esc(record?.note||'')}</textarea></label><p id="expense-error" class="expense-error" role="alert" hidden></p>${formActions('保存这笔花销')}</form>`);
+}
+function commitExpenses(next){const previous=state.expenses;state.expenses=next;if(save())return true;state.expenses=previous;return false;}
+function submitExpenseForm(form,get){
+  const error=document.querySelector('#expense-error'),fail=message=>{error.textContent=message;error.hidden=false;};
+  const amountCents=parseExpenseAmount(get('amount')),date=get('date'),title=get('title'),category=get('category'),note=get('note'),id=form.dataset.id;
+  if(!title||title.length>80){fail('请填写花销项目，最多 80 个字');return;}
+  if(amountCents===null){fail('金额请填 0.01 到 999999.99，最多两位小数');return;}
+  if(!validDate(date)||date<'2000-01-01'||date>'2099-12-31'){fail('请选择 2000 至 2099 年的有效日期');return;}
+  if(!EXPENSE_CATEGORIES.some(c=>c.id===category)||note.length>300){fail('请检查分类和备注');return;}
+  if(id&&!state.expenses.some(x=>x.id===id)){fail('这笔花销已不存在，请关闭后重新添加');return;}
+  if(!id&&state.expenses.length>=MAX_EXPENSES){fail('花销已达 10000 笔，请先导出备份整理记录');return;}
+  const record={id:id||uid(),date,title,amountCents,category,note};
+  const next=id?state.expenses.map(x=>x.id===id?record:x):[...state.expenses,record];
+  if(!commitExpenses(next)){fail('未能保存，填写的内容还在。请先到设置导出备份，再重试。');return;}
+  selectedExpenseMonth=date.slice(0,7);dialog.close();render();toast('这笔花销已保存');
+}
 function renderHistory(){
   const dates=recentDays(),records=dates.map(k=>state.days[k]),count=records.filter(hasRecord).length,focus=records.filter(d=>d?.focus.done).length,total=records.reduce((a,d)=>a+(d?minutes(d):0),0),all=Object.keys(state.days).filter(k=>hasRecord(state.days[k])).sort().reverse();
   return titleBlock('回头看看，已经走了一点','每一笔记录，都是照顾自己的痕迹。')+
@@ -216,7 +279,7 @@ function renderProjects(){
 function renderSettings(){return titleBlock('把这里，调成你的节奏','简单设置，照顾真实的自己。')+
   `<div class="settings-grid"><section class="panel"><h2 class="panel-title">我的偏好</h2><p class="panel-description">所有目标都可以按自己的需要调整。</p><form id="preferences-form"><label class="field"><span>怎么称呼你</span><input name="name" maxlength="30" value="${esc(state.settings.name)}" placeholder="你的名字或昵称"></label><label class="field"><span>个人饮水参考目标（ml）</span><input name="waterGoal" type="number" min="0" max="10000" step="50" value="${state.settings.waterGoal}" inputmode="numeric"><small>填 0 只记录总量；这里的目标由你自己决定。</small></label><label class="field"><span>步骤与专注的项目名称</span><input name="projectName" required maxlength="80" value="${esc(state.settings.projectName)}"></label><button class="primary-button" type="submit">${icon('check')}保存偏好</button></form></section>
   <section class="panel"><div class="section-title"><h2>我的补剂安排</h2><button class="text-button" data-action="supplement-add">${icon('plus')}添加</button></div><p class="panel-description">记录已有的安排，不生成补剂或用量建议。</p><div class="plan-list">${supplementRows()}</div><div class="info-box">补剂名称和备注都由你填写。每天在「今日」页面点选已使用的项目，记录会按日期保存。</div></section>
-  <section class="panel"><h2 class="panel-title">记录与备份</h2><p class="panel-description">生活记录保存在当前浏览器中。</p><div class="info-box">换设备、换浏览器或清除浏览器数据后，记录不会自动同步。可以先导出备份，再在新设备导入。</div><div class="settings-actions"><button class="secondary-button" data-action="export">${icon('download')}${storageBlocked?'导出原始备份':'导出备份'}</button><button class="secondary-button" data-action="import">${icon('upload')}导入备份</button><input type="file" id="import-file" accept=".json,application/json" hidden></div><p class="data-foot">已保存 ${Object.values(state.days).filter(hasRecord).length} 天的记录 · ${state.tasks.length} 个项目步骤<br>备份格式：JSON。导入前会确认，并提供现有数据备份。</p></section>
+  <section class="panel"><h2 class="panel-title">记录与备份</h2><p class="panel-description">生活记录和花销保存在当前浏览器中。</p><div class="info-box">换设备、换浏览器或清除浏览器数据后，记录不会自动同步。可以先导出备份，再在新设备导入。</div><div class="settings-actions"><button class="secondary-button" data-action="export">${icon('download')}${storageBlocked?'导出原始备份':'导出备份'}</button><button class="secondary-button" data-action="import">${icon('upload')}导入备份</button><input type="file" id="import-file" accept=".json,application/json" hidden></div><p class="data-foot">已保存 ${Object.values(state.days).filter(hasRecord).length} 天的记录 · ${state.tasks.length} 个项目步骤 · ${state.expenses.length} 笔花销<br>备份格式：JSON。导入前会确认，并提供现有数据备份。</p></section>
   <section class="panel"><h2 class="panel-title">一个轻一点的生活空间</h2><p class="panel-description">一天做好一件事，也可以很好。</p><p class="info-box">这里没有连续打卡排名，也没有必须填满的清单。按需记录，允许空白。让工具替你记住小事，把注意力留给生活。</p><p class="hint">手机使用：可以通过浏览器的「添加到主屏幕」把本站放在桌面。是否支持安装取决于浏览器。</p><p class="version-label">慢慢来 · 网页版 1.0</p></section></div>`;}
 function supplementRows(){return state.supplementPlan.length?state.supplementPlan.map(p=>`<div class="plan-row"><div>${esc(p.name)}${p.note?`<small>${esc(p.note)}</small>`:''}</div><button class="icon-button" data-action="supplement-edit" data-id="${esc(p.id)}" aria-label="编辑补剂 ${esc(p.name)}">${icon('edit')}</button><button class="icon-button" data-action="supplement-delete" data-id="${esc(p.id)}" aria-label="删除补剂 ${esc(p.name)}">${icon('trash')}</button></div>`).join(''):'<p class="hint">还没有添加补剂。有需要时再添加就好。</p>';}
 function openDialog(title,body){document.querySelector('#dialog-content').innerHTML=`<div class="dialog-inner"><div class="dialog-header"><h2 id="dialog-title">${esc(title)}</h2><button class="icon-button" data-action="dialog-close" aria-label="关闭">${icon('close')}</button></div>${body}</div>`;if(!dialog.open)dialog.showModal();}
@@ -234,6 +297,15 @@ function downloadBackup(){const contents=storageBlocked&&rawBackup?rawBackup:JSO
 document.addEventListener('click',event=>{
   const b=event.target.closest('[data-action]');if(!b||b.disabled)return;const action=b.dataset.action,id=b.dataset.id,key=b.dataset.key;const d=day();
   switch(action){
+    case 'expense-add':expenseDialog();return;
+    case 'expense-edit':expenseDialog(id);return;
+    case 'expense-delete':{
+      const record=state.expenses.find(x=>x.id===id);if(!record)return;
+      confirmAction('删除这笔花销？',`${record.date} · ${record.title} · ${formatMoney(record.amountCents)}。删除后会重新计算当月花销。`,()=>{if(commitExpenses(state.expenses.filter(x=>x.id!==id))){render();toast('这笔花销已删除');}});return;
+    }
+    case 'expense-month-prev':selectedExpenseMonth=shiftMonth(selectedExpenseMonth,-1);render();return;
+    case 'expense-month-next':selectedExpenseMonth=shiftMonth(selectedExpenseMonth,1);render();return;
+    case 'expense-month-today':selectedExpenseMonth=localDate().slice(0,7);render();return;
     case 'goal-count-down':setPublishedGames(state.goals.publishedGames-1);return;
     case 'goal-count-up':setPublishedGames(state.goals.publishedGames+1);return;
     case 'nav':navigate(b.dataset.view);return;
@@ -275,7 +347,12 @@ document.addEventListener('click',event=>{
     case 'timer-finish':finishTimer();return;
     case 'export':downloadBackup();toast('备份已准备下载');return;
     case 'import':document.querySelector('#import-file').click();return;
-    case 'import-apply':if(!pendingImport)return;downloadBackup();state=pendingImport;state.timer=null;pendingImport=null;storageBlocked=false;save();dialog.close();render();toast('备份已恢复，原有记录已导出');return;
+    case 'import-apply':{
+      if(!pendingImport)return;downloadBackup();
+      const previous=state,wasBlocked=storageBlocked;state={...pendingImport,timer:null};storageBlocked=false;
+      if(!save()){state=previous;storageBlocked=wasBlocked;toast('未能恢复备份，当前记录已保留，请检查浏览器存储空间');return;}
+      pendingImport=null;dialog.close();render();toast('备份已恢复，原有记录已导出');return;
+    }
     default:return;
   }
   save();render();
@@ -285,6 +362,7 @@ document.addEventListener('input',event=>{
 });
 document.addEventListener('change',async event=>{
   const el=event.target;
+  if(el.id==='expense-month'){if(validMonth(el.value)){selectedExpenseMonth=el.value;render();}else{el.value=selectedExpenseMonth;toast('请选择 2000 至 2099 年的有效月份');}return;}
   if(el.dataset.goalCheck){
     const key=el.dataset.goalCheck;if(!PERSONAL_GOALS.some(g=>g.id===key))return;
     state.goals[key]=el.checked;save();
@@ -307,12 +385,13 @@ document.addEventListener('change',async event=>{
   if(el.dataset.taskStatus){const task=state.tasks.find(x=>x.id===el.dataset.taskStatus);if(task){if(task.status!=='done'&&el.value==='done')day(localDate()).checks.game=true;task.status=el.value;save();render();}}
   if(el.id==='import-file'){
     const file=el.files[0];el.value='';if(!file)return;
-    try{if(file.size>5*1024*1024)throw new Error('文件超过 5 MB，请选择较小的备份');pendingImport=validateState(JSON.parse(await file.text()));openDialog('恢复这份备份？',`<p class="dialog-help">文件：${esc(file.name)}<br>包含 ${Object.values(pendingImport.days).filter(hasRecord).length} 天记录、${pendingImport.tasks.length} 个项目步骤，目标进度也会一并恢复。</p><div class="info-box">导入会替换当前设备的记录，专注计时会停止。点击恢复时会先下载一份现有数据备份。</div><div class="dialog-actions"><button class="secondary-button" data-action="dialog-close">取消</button><button class="primary-button" data-action="import-apply">备份现有数据并恢复</button></div>`);}catch(error){pendingImport=null;toast('未导入：'+(error instanceof SyntaxError?'文件不是有效的 JSON 备份':error.message));}
+    try{if(file.size>25*1024*1024)throw new Error('文件超过 25 MB，请选择较小的备份');pendingImport=validateState(JSON.parse(await file.text()));openDialog('恢复这份备份？',`<p class="dialog-help">文件：${esc(file.name)}<br>包含 ${Object.values(pendingImport.days).filter(hasRecord).length} 天记录、${pendingImport.tasks.length} 个项目步骤、${pendingImport.expenses.length} 笔花销，目标进度也会一并恢复。</p><div class="info-box">导入会替换当前设备的记录，专注计时会停止。点击恢复时会先下载一份现有数据备份。</div><div class="dialog-actions"><button class="secondary-button" data-action="dialog-close">取消</button><button class="primary-button" data-action="import-apply">备份现有数据并恢复</button></div>`);}catch(error){pendingImport=null;toast('未导入：'+(error instanceof SyntaxError?'文件不是有效的 JSON 备份':error.message));}
   }
 });
 document.addEventListener('submit',event=>{
   const f=event.target;if(!f.id.endsWith('-form'))return;event.preventDefault();const data=new FormData(f),get=k=>String(data.get(k)||'').trim();const d=day();
   switch(f.id){
+    case 'expense-form':submitExpenseForm(f,get);return;
     case 'focus-form':{const value=get('text');if(!value)return;d.focus={text:value,done:value===d.focus.text?d.focus.done:false};break;}
     case 'water-form':{const ml=+get('ml');if(!Number.isInteger(ml)||ml<1||ml>3000)return;d.water.push({id:uid(),ml,time:new Date().toISOString()});d.checks.water=true;break;}
     case 'exercise-form':{const n=+get('minutes');if(!get('type')||!Number.isInteger(n)||n<1||n>720)return;d.exercise.push({id:uid(),type:get('type'),minutes:n});d.checks.exercise=true;break;}
