@@ -18,6 +18,11 @@ const EXPENSE_CATEGORIES = Object.freeze([
 ]);
 const MAX_EXPENSE_CENTS = 99999999;
 const MAX_EXPENSES = 10000;
+const EXPENSE_FREQUENCIES = Object.freeze([
+  {id:'once',name:'单次 / 不固定'},
+  {id:'monthly',name:'每月固定'},
+  {id:'yearly',name:'每年一次'}
+]);
 const paths = {
   wallet:'<path d="M3 6h17v14H3V6Zm0 0V4h14v2M16 11h5v5h-5z"/><path d="M18 13.5h.01"/>',
   sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/>',
@@ -92,7 +97,8 @@ function validateState(raw){
     const expenseIds=new Set();
     s.expenses=raw.expenses.map(x=>{
       if(!x||typeof x.id!=='string'||!x.id.trim()||x.id.length>100||expenseIds.has(x.id)||!validDate(x.date)||x.date<'2000-01-01'||x.date>'2099-12-31'||typeof x.title!=='string'||!x.title.trim()||x.title.length>80||!Number.isSafeInteger(x.amountCents)||x.amountCents<1||x.amountCents>MAX_EXPENSE_CENTS||!EXPENSE_CATEGORIES.some(c=>c.id===x.category)||(x.note!==undefined&&(typeof x.note!=='string'||x.note.length>300)))throw new Error('花销记录包含无效日期、金额或重复编号，请检查备份');
-      expenseIds.add(x.id);return {id:x.id,date:x.date,title:x.title.trim(),amountCents:x.amountCents,category:x.category,note:x.note||''};
+      if(x.frequency!==undefined&&!EXPENSE_FREQUENCIES.some(f=>f.id===x.frequency))throw new Error('花销记录包含无效的支出频率，请检查备份');
+      expenseIds.add(x.id);return {id:x.id,date:x.date,title:x.title.trim(),amountCents:x.amountCents,category:x.category,frequency:x.frequency||'once',note:x.note||''};
     });
   }
   for(const {id} of GAME_PROJECTS){if(typeof raw.gameChecks?.[id]==='boolean')s.gameChecks[id]=raw.gameChecks[id];}
@@ -123,6 +129,7 @@ let state, storageBlocked=false, initialError='',rawBackup='';
 try{rawBackup=localStorage.getItem(STORAGE_KEY)||'';state=rawBackup?validateState(JSON.parse(rawBackup)):blankState();}catch(error){state=blankState();storageBlocked=true;initialError='无法读取本地记录。请先在设置中导出原始备份，再恢复数据。';}
 let selectedDate=localDate();
 let selectedExpenseMonth=localDate().slice(0,7);
+let expensePeriod='month';
 let currentCalendarDate=localDate();
 let view=['today','history','projects','goals','expenses','settings'].includes(location.hash.slice(1))?location.hash.slice(1):'today';
 let timerPreset=15,toastTimeout,detailRecordsOpen=false,projectDetailsOpen=!!state.timer;
@@ -224,33 +231,40 @@ function setPublishedGames(value){
   document.querySelector('#published-games-note').textContent=done?'10 个已上架，目标完成。':`已上架 ${value} 个，还差 ${10-value} 个。`;updateGoalSummary();
 }
 function expensesForMonth(month){return state.expenses.filter(x=>x.date.slice(0,7)===month).sort((a,b)=>b.date.localeCompare(a.date));}
+function expensesForYear(year){return state.expenses.filter(x=>x.date.slice(0,4)===year).sort((a,b)=>b.date.localeCompare(a.date));}
+function expenseYearSummary(year){
+  const rows=expensesForYear(year);
+  return {totalCents:rows.reduce((sum,x)=>sum+x.amountCents,0),yearlyCents:rows.filter(x=>x.frequency==='yearly').reduce((sum,x)=>sum+x.amountCents,0),count:rows.length};
+}
 function renderExpenses(){
-  const rows=expensesForMonth(selectedExpenseMonth),total=rows.reduce((sum,x)=>sum+x.amountCents,0);
-  const [year,month]=selectedExpenseMonth.split('-'),label=`${year} 年 ${Number(month)} 月`;
+  const isYear=expensePeriod==='year',[year,month]=selectedExpenseMonth.split('-');
+  const rows=isYear?expensesForYear(year):expensesForMonth(selectedExpenseMonth),total=rows.reduce((sum,x)=>sum+x.amountCents,0),annual=expenseYearSummary(year);
+  const label=isYear?`${year} 年`:`${year} 年 ${Number(month)} 月`,periodLabel=isYear?'这一年':'这个月';
   const categories=EXPENSE_CATEGORIES.map(c=>({...c,total:rows.filter(x=>x.category===c.id).reduce((sum,x)=>sum+x.amountCents,0)})).filter(c=>c.total>0).sort((a,b)=>b.total-a.total);
-  return titleBlock('花出去的，轻轻记下来','一笔一笔记录，看看每个月花在哪里。',`<button class="primary-button expense-add-button" data-action="expense-add">${icon('plus')}记一笔</button>`)+
-    `<section class="expense-overview" aria-label="月度花销汇总"><div class="expense-month-controls"><button class="icon-button" data-action="expense-month-prev" aria-label="上个月" ${selectedExpenseMonth==='2000-01'?'disabled':''}>${icon('left')}</button><label class="visually-hidden" for="expense-month">花销月份</label><input id="expense-month" type="month" min="2000-01" max="2099-12" value="${selectedExpenseMonth}"><button class="icon-button" data-action="expense-month-next" aria-label="下个月" ${selectedExpenseMonth==='2099-12'?'disabled':''}>${icon('right')}</button><button class="text-button" data-action="expense-month-today">本月</button></div><div class="expense-total"><div><p>${label} · 总花销</p><strong aria-label="当月总花销">${formatMoney(total)}</strong></div><span>共 ${rows.length} 笔记录</span></div></section>
-    <div class="expense-layout"><section class="panel expense-records" aria-label="花销明细"><div class="section-title"><h2>这个月的明细</h2><span>按日期排列</span></div>${rows.length?`<div class="expense-list">${rows.map(x=>`<article class="expense-row"><div class="expense-row-main"><div class="expense-row-heading"><h3>${esc(x.title)}</h3><strong>${formatMoney(x.amountCents)}</strong></div><p class="expense-meta"><time datetime="${x.date}">${x.date.replaceAll('-','/')}</time><span>${esc(EXPENSE_CATEGORIES.find(c=>c.id===x.category).name)}</span></p>${x.note?`<p class="expense-note">${esc(x.note)}</p>`:''}</div><div class="expense-row-actions"><button class="icon-button" data-action="expense-edit" data-id="${esc(x.id)}" aria-label="编辑花销：${esc(x.title)}">${icon('edit')}</button><button class="icon-button" data-action="expense-delete" data-id="${esc(x.id)}" aria-label="删除花销：${esc(x.title)}">${icon('trash')}</button></div></article>`).join('')}</div>`:`<div class="empty-state">${icon('wallet')}<h3>这个月还没有记录</h3><p>房租、一顿饭、一次订阅，都可以记在这里。</p><button class="secondary-button" data-action="expense-add">${icon('plus')}记下第一笔</button></div>`}</section>
-    <aside class="panel expense-categories" aria-label="花销分类汇总"><h2 class="panel-title">花在哪里</h2>${categories.length?`<ul>${categories.map(c=>`<li><div><span>${c.name}</span><strong>${formatMoney(c.total)}</strong></div><progress value="${c.total}" max="${total}" aria-label="${c.name}，${formatMoney(c.total)}"></progress></li>`).join('')}</ul>`:'<p class="hint">记下花销后，这里会按分类汇总。</p>'}</aside></div><p class="expense-storage-note">金额单位：人民币元。记录保存在当前浏览器，可在「设置」导出备份。</p>`;
+  return titleBlock('花出去的，轻轻记下来','日常开销、月费和年费，都可以记在这里。',`<button class="primary-button expense-add-button" data-action="expense-add">${icon('plus')}记一笔</button>`)+
+    `<section class="expense-overview" aria-label="${isYear?'年度':'月度'}花销汇总"><div class="expense-period-switch" role="group" aria-label="花销统计范围"><button data-action="expense-period" data-period="month" aria-pressed="${!isYear}">按月</button><button data-action="expense-period" data-period="year" aria-pressed="${isYear}">按年</button></div><div class="expense-month-controls"><button class="icon-button" data-action="expense-month-prev" aria-label="${isYear?'上一年':'上个月'}" ${(isYear?year==='2000':selectedExpenseMonth==='2000-01')?'disabled':''}>${icon('left')}</button>${isYear?`<label class="visually-hidden" for="expense-year">花销年份</label><input id="expense-year" type="number" inputmode="numeric" min="2000" max="2099" step="1" value="${year}" aria-describedby="expense-year-help"><span id="expense-year-help" class="visually-hidden">2000 至 2099 年</span>`:`<label class="visually-hidden" for="expense-month">花销月份</label><input id="expense-month" type="month" min="2000-01" max="2099-12" value="${selectedExpenseMonth}">`}<button class="icon-button" data-action="expense-month-next" aria-label="${isYear?'下一年':'下个月'}" ${(isYear?year==='2099':selectedExpenseMonth==='2099-12')?'disabled':''}>${icon('right')}</button><button class="text-button" data-action="expense-month-today">${isYear?'本年':'本月'}</button></div><div class="expense-total"><div><p>${label} · 已支付花销</p><strong aria-label="${isYear?'当年':'当月'}总花销">${formatMoney(total)}</strong></div><span>共 ${rows.length} 笔记录</span></div><div class="expense-year-summary">${!isYear?`<span>${year} 年合计 <strong>${formatMoney(annual.totalCents)}</strong></span>`:''}<span>全年年付项目已付 <strong>${formatMoney(annual.yearlyCents)}</strong></span></div></section>
+    <div class="expense-layout"><section class="panel expense-records" aria-label="花销明细"><div class="section-title"><h2>${periodLabel}的明细</h2><span>按日期排列</span></div>${rows.length?`<div class="expense-list">${rows.map(x=>`<article class="expense-row"><div class="expense-row-main"><div class="expense-row-heading"><h3>${esc(x.title)}</h3><strong>${formatMoney(x.amountCents)}</strong></div><p class="expense-meta"><time datetime="${x.date}">${x.date.replaceAll('-','/')}</time><span>${esc(EXPENSE_CATEGORIES.find(c=>c.id===x.category).name)}</span><span class="expense-frequency ${x.frequency==='yearly'?'yearly':''}">${EXPENSE_FREQUENCIES.find(f=>f.id===x.frequency)?.name||'单次 / 不固定'}</span></p>${x.note?`<p class="expense-note">${esc(x.note)}</p>`:''}</div><div class="expense-row-actions"><button class="icon-button" data-action="expense-edit" data-id="${esc(x.id)}" aria-label="编辑花销：${esc(x.title)}">${icon('edit')}</button><button class="icon-button" data-action="expense-delete" data-id="${esc(x.id)}" aria-label="删除花销：${esc(x.title)}">${icon('trash')}</button></div></article>`).join('')}</div>`:`<div class="empty-state">${icon('wallet')}<h3>${periodLabel}还没有记录</h3><p>房租、一顿饭、一笔年费，都可以记在这里。</p><button class="secondary-button" data-action="expense-add">${icon('plus')}记下第一笔</button></div>`}</section>
+    <aside class="panel expense-categories" aria-label="花销分类汇总"><h2 class="panel-title">花在哪里</h2>${categories.length?`<ul>${categories.map(c=>`<li><div><span>${c.name}</span><strong>${formatMoney(c.total)}</strong></div><progress value="${c.total}" max="${total}" aria-label="${c.name}，${formatMoney(c.total)}"></progress></li>`).join('')}</ul>`:'<p class="hint">记下花销后，这里会按分类汇总。</p>'}</aside></div><p class="expense-storage-note">按实际付款日期计入当月和当年，每次付款后记一笔。金额单位：人民币元。记录保存在当前浏览器，可在「设置」导出备份。</p>`;
 }
 function expenseDialog(id){
   const record=id?state.expenses.find(x=>x.id===id):null;
   if(id&&!record){toast('这笔花销已不存在');return;}
   if(!record&&state.expenses.length>=MAX_EXPENSES){toast('花销已达 10000 笔，请先导出备份整理记录');return;}
   const date=record?.date||(selectedExpenseMonth===localDate().slice(0,7)?localDate():selectedExpenseMonth+'-01');
-  openDialog(record?'编辑这笔花销':'记下一笔花销',`<form id="expense-form" data-id="${esc(record?.id||'')}"><p class="dialog-help">按实际支付日期记录，金额单位为人民币元。</p><label class="field"><span>花销项目</span><input name="title" required maxlength="80" value="${esc(record?.title||'')}" placeholder="例如：房租、晚饭、软件订阅" autofocus></label><div class="field-row"><label class="field"><span>金额（元）</span><input name="amount" type="text" inputmode="decimal" required maxlength="12" value="${record?(record.amountCents/100).toFixed(2):''}" placeholder="0.00" autocomplete="off"></label><label class="field"><span>花销日期</span><input name="date" type="date" required min="2000-01-01" max="2099-12-31" value="${date}"></label></div><label class="field"><span>分类</span><select name="category">${EXPENSE_CATEGORIES.map(c=>`<option value="${c.id}" ${(record?.category||'other')===c.id?'selected':''}>${c.name}</option>`).join('')}</select></label><label class="field"><span>备注（可选）</span><textarea name="note" maxlength="300" rows="2" placeholder="想补充的内容，可以留在这里">${esc(record?.note||'')}</textarea></label><p id="expense-error" class="expense-error" role="alert" hidden></p>${formActions('保存这笔花销')}</form>`);
+  openDialog(record?'编辑这笔花销':'记下一笔花销',`<form id="expense-form" data-id="${esc(record?.id||'')}"><p class="dialog-help">每次实际付款后记一笔，金额单位为人民币元。</p><label class="field"><span>花销项目</span><input name="title" required maxlength="80" value="${esc(record?.title||'')}" placeholder="例如：房租、晚饭、会员年费" autofocus></label><div class="field-row"><label class="field"><span>金额（元）</span><input name="amount" type="text" inputmode="decimal" required maxlength="12" value="${record?(record.amountCents/100).toFixed(2):''}" placeholder="0.00" autocomplete="off"></label><label class="field"><span>花销日期</span><input name="date" type="date" required min="2000-01-01" max="2099-12-31" value="${date}"></label></div><label class="field"><span>支出频率</span><select name="frequency" aria-describedby="expense-frequency-help">${EXPENSE_FREQUENCIES.map(f=>`<option value="${f.id}" ${(record?.frequency||'once')===f.id?'selected':''}>${f.name}</option>`).join('')}</select><small id="expense-frequency-help">年费选「每年一次」，填本次实际支付的全年金额。</small></label><label class="field"><span>分类</span><select name="category">${EXPENSE_CATEGORIES.map(c=>`<option value="${c.id}" ${(record?.category||'other')===c.id?'selected':''}>${c.name}</option>`).join('')}</select></label><label class="field"><span>备注（可选）</span><textarea name="note" maxlength="300" rows="2" placeholder="想补充的内容，可以留在这里">${esc(record?.note||'')}</textarea></label><p id="expense-error" class="expense-error" role="alert" hidden></p>${formActions('保存这笔花销')}</form>`);
 }
 function commitExpenses(next){const previous=state.expenses;state.expenses=next;if(save())return true;state.expenses=previous;return false;}
 function submitExpenseForm(form,get){
   const error=document.querySelector('#expense-error'),fail=message=>{error.textContent=message;error.hidden=false;};
-  const amountCents=parseExpenseAmount(get('amount')),date=get('date'),title=get('title'),category=get('category'),note=get('note'),id=form.dataset.id;
+  const amountCents=parseExpenseAmount(get('amount')),date=get('date'),title=get('title'),category=get('category'),frequency=get('frequency'),note=get('note'),id=form.dataset.id;
   if(!title||title.length>80){fail('请填写花销项目，最多 80 个字');return;}
   if(amountCents===null){fail('金额请填 0.01 到 999999.99，最多两位小数');return;}
   if(!validDate(date)||date<'2000-01-01'||date>'2099-12-31'){fail('请选择 2000 至 2099 年的有效日期');return;}
   if(!EXPENSE_CATEGORIES.some(c=>c.id===category)||note.length>300){fail('请检查分类和备注');return;}
+  if(!EXPENSE_FREQUENCIES.some(f=>f.id===frequency)){fail('请选择有效的支出频率');return;}
   if(id&&!state.expenses.some(x=>x.id===id)){fail('这笔花销已不存在，请关闭后重新添加');return;}
   if(!id&&state.expenses.length>=MAX_EXPENSES){fail('花销已达 10000 笔，请先导出备份整理记录');return;}
-  const record={id:id||uid(),date,title,amountCents,category,note};
+  const record={id:id||uid(),date,title,amountCents,category,frequency,note};
   const next=id?state.expenses.map(x=>x.id===id?record:x):[...state.expenses,record];
   if(!commitExpenses(next)){fail('未能保存，填写的内容还在。请先到设置导出备份，再重试。');return;}
   selectedExpenseMonth=date.slice(0,7);dialog.close();render();toast('这笔花销已保存');
@@ -301,10 +315,11 @@ document.addEventListener('click',event=>{
     case 'expense-edit':expenseDialog(id);return;
     case 'expense-delete':{
       const record=state.expenses.find(x=>x.id===id);if(!record)return;
-      confirmAction('删除这笔花销？',`${record.date} · ${record.title} · ${formatMoney(record.amountCents)}。删除后会重新计算当月花销。`,()=>{if(commitExpenses(state.expenses.filter(x=>x.id!==id))){render();toast('这笔花销已删除');}});return;
+      confirmAction('删除这笔花销？',`${record.date} · ${record.title} · ${formatMoney(record.amountCents)}。删除后会重新计算花销汇总。`,()=>{if(commitExpenses(state.expenses.filter(x=>x.id!==id))){render();toast('这笔花销已删除');}});return;
     }
-    case 'expense-month-prev':selectedExpenseMonth=shiftMonth(selectedExpenseMonth,-1);render();return;
-    case 'expense-month-next':selectedExpenseMonth=shiftMonth(selectedExpenseMonth,1);render();return;
+    case 'expense-period':if(['month','year'].includes(b.dataset.period)){expensePeriod=b.dataset.period;render();}return;
+    case 'expense-month-prev':selectedExpenseMonth=shiftMonth(selectedExpenseMonth,expensePeriod==='year'?-12:-1);render();return;
+    case 'expense-month-next':selectedExpenseMonth=shiftMonth(selectedExpenseMonth,expensePeriod==='year'?12:1);render();return;
     case 'expense-month-today':selectedExpenseMonth=localDate().slice(0,7);render();return;
     case 'goal-count-down':setPublishedGames(state.goals.publishedGames-1);return;
     case 'goal-count-up':setPublishedGames(state.goals.publishedGames+1);return;
@@ -363,6 +378,7 @@ document.addEventListener('input',event=>{
 document.addEventListener('change',async event=>{
   const el=event.target;
   if(el.id==='expense-month'){if(validMonth(el.value)){selectedExpenseMonth=el.value;render();}else{el.value=selectedExpenseMonth;toast('请选择 2000 至 2099 年的有效月份');}return;}
+  if(el.id==='expense-year'){if(validMonth(el.value+'-01')){selectedExpenseMonth=el.value+selectedExpenseMonth.slice(4);render();}else{el.value=selectedExpenseMonth.slice(0,4);toast('请选择 2000 至 2099 年的有效年份');}return;}
   if(el.dataset.goalCheck){
     const key=el.dataset.goalCheck;if(!PERSONAL_GOALS.some(g=>g.id===key))return;
     state.goals[key]=el.checked;save();
