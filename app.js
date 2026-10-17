@@ -136,20 +136,63 @@ function validateState(raw){
   return s;
 }
 let state, storageBlocked=false, initialError='',rawBackup='';
-try{rawBackup=localStorage.getItem(STORAGE_KEY)||'';state=rawBackup?validateState(JSON.parse(rawBackup)):blankState();}catch(error){state=blankState();storageBlocked=true;initialError='无法读取本地记录。请先在设置中导出原始备份，再恢复数据。';}
+let localStore=null,localWriteError='',pendingExternalRender=false;
+const cloneState=value=>JSON.parse(JSON.stringify(value));
+try{
+  rawBackup=localStorage.getItem(STORAGE_KEY)||'';
+  localStore=SlowdayPersistence.create({storage:localStorage,key:STORAGE_KEY,validate:validateState,blank:blankState});
+  const loaded=localStore.load();if(!loaded.ok)throw loaded.error;state=loaded.state;
+}catch(error){state=blankState();storageBlocked=true;initialError='无法读取本地记录。请先在设置中导出原始备份，再恢复数据。';}
+const cloudConfig=globalThis.SLOWDAY_CLOUD_CONFIG||{};
+const cloudConfigured=typeof cloudConfig.url==='string'&&/^https:\/\//.test(cloudConfig.url)&&typeof cloudConfig.publishableKey==='string'&&!!cloudConfig.publishableKey;
+let cloudClient=null,cloudEngine=null,cloudUser=null,cloudBusy=false,cloudAuthMessage='',cloudReplaceAllowed=false,cloudRestoreBase=null,cloudNeedsSetup=false;
+let cloudStatus={phase:'local',message:cloudConfigured?'记录已保存在此设备；登录后可连接云端。':'云端尚未连接，记录先保存在此设备'};
+const cloudAuthReturn=/(access_token|error_description|[?&]code=)/.test(location.hash+location.search);
 let selectedDate=localDate();
 let legacyExpensesOpen=false,legacyExpenseLimit=20;
 let currentCalendarDate=localDate();
-let view=['today','history','projects','goals','expenses','settings'].includes(location.hash.slice(1))?location.hash.slice(1):'today';
+let view=cloudAuthReturn?'settings':['today','history','projects','goals','expenses','settings'].includes(location.hash.slice(1))?location.hash.slice(1):'today';
 let timerPreset=15,toastTimeout,detailRecordsOpen=false,projectDetailsOpen=!!state.timer;
 const main=document.querySelector('#main'),dialog=document.querySelector('#dialog');
 function day(key=selectedDate){if(!state.days[key])state.days[key]=blankDay();return state.days[key];}
-function save(){
-  if(storageBlocked){setSaved('保存暂停，请先导出备份',true);return false;}
-  try{localStorage.setItem(STORAGE_KEY,JSON.stringify(state));setSaved('已在此设备保存');return true;}
-  catch(error){setSaved('保存失败，请导出备份',true);toast('浏览器无法保存记录，请到设置导出备份');return false;}
+function save(previous){
+  if(storageBlocked){if(previous)state=previous;updateSaveIndicator();toast('保存暂停，请先到设置导出原始备份并恢复记录');return false;}
+  const result=localStore.save(state);
+  if(!result.ok){
+    if(previous)state=previous;
+    localWriteError='保存失败，请导出备份';
+    if(['INVALID_DATA','MISSING_DATA'].includes(result.error.code))blockMissingOrInvalidStorage(result.error,previous||state);
+    updateSaveIndicator();toast('本次修改未能保存，请到设置导出备份');return false;
+  }
+  const mergedOtherChanges=JSON.stringify(state)!==JSON.stringify(result.state);
+  state=result.state;localWriteError='';cloudEngine?.note();updateSaveIndicator();if(mergedOtherChanges)setTimeout(renderWhenSafe,0);return true;
 }
 function setSaved(message,error=false){document.querySelector('#saved-state').innerHTML=`<i style="${error?'background:#c99b78':''}"></i>${esc(message)}`;}
+function updateSaveIndicator(){
+  const message=storageBlocked?'保存暂停，请先导出备份':localWriteError||(['syncing','synced','error'].includes(cloudStatus.phase)?cloudStatus.message:cloudUser?'本机已保存 · 云端待连接':'已在此设备保存');
+  setSaved(message,storageBlocked||!!localWriteError||cloudStatus.phase==='error');
+  const status=document.querySelector('#cloud-status-message');if(status)status.textContent=cloudStatus.message;
+}
+function editingForm(){const active=document.activeElement;return dialog.open||!!active?.matches?.('textarea,select,input:not([type="checkbox"]):not([type="radio"])')||!!active?.closest?.('#cloud-auth-form');}
+function renderWhenSafe(){if(editingForm()){pendingExternalRender=true;updateSaveIndicator();return;}pendingExternalRender=false;render();}
+function blockMissingOrInvalidStorage(error,preserved=state){
+  storageBlocked=true;
+  try{rawBackup=localStorage.getItem(STORAGE_KEY)||JSON.stringify(preserved);}catch(_){rawBackup=rawBackup||JSON.stringify(preserved);}
+  localWriteError=error.code==='MISSING_DATA'?'本机记录被清除，请从备份或云端恢复':'本机记录格式异常，请先导出备份';
+  if(cloudUser)void cloudEngine?.connect(cloudUser,{resume:false});
+}
+function refreshLocalRecords(){
+  if(storageBlocked||!localStore)return false;
+  const result=localStore.refresh(state);
+  if(!result.ok){if(['INVALID_DATA','MISSING_DATA'].includes(result.error.code))blockMissingOrInvalidStorage(result.error);else localWriteError='暂时无法读取其他页面的记录';updateSaveIndicator();return false;}
+  const changed=JSON.stringify(state)!==JSON.stringify(result.state);state=result.state;
+  if(changed){cloudEngine?.note();renderWhenSafe();}else updateSaveIndicator();return true;
+}
+function replaceLocalRecords(next){
+  if(!localStore){try{localStore=SlowdayPersistence.create({storage:localStorage,key:STORAGE_KEY,validate:validateState,blank:blankState});}catch(_){return false;}}
+  const result=localStore.replace(next);if(!result.ok){localWriteError='恢复未能保存，请保留备份';updateSaveIndicator();return false;}
+  state=result.state;storageBlocked=false;rawBackup='';localWriteError='';updateSaveIndicator();return true;
+}
 function toast(message){const el=document.querySelector('#toast');el.textContent=message;el.classList.add('show');clearTimeout(toastTimeout);toastTimeout=setTimeout(()=>el.classList.remove('show'),3000);}
 const navItems=[['today','home','今日'],['goals','star','目标'],['expenses','wallet','花销'],['history','chart','回顾'],['projects','game','小游戏'],['settings','settings','设置']];
 function renderNav(){
@@ -159,7 +202,7 @@ function renderNav(){
   document.querySelector('#settings-icon').innerHTML=icon('settings');
   document.querySelector('#profile-name').textContent=state.settings.name||'我的小天地';document.querySelector('#avatar').textContent=state.settings.name?.slice(0,1)||'我';
 }
-function render(){renderNav();main.innerHTML=({today:renderToday,history:renderHistory,projects:renderProjects,goals:renderGoals,expenses:renderExpenses,settings:renderSettings})[view]();if(storageBlocked)setSaved('保存暂停，请先导出备份',true);}
+function render(){renderNav();main.innerHTML=({today:renderToday,history:renderHistory,projects:renderProjects,goals:renderGoals,expenses:renderExpenses,settings:renderSettings})[view]();updateSaveIndicator();}
 function refreshDailyDate(){
   const now=localDate();if(now===currentCalendarDate||dialog.open)return;
   const previous=currentCalendarDate;currentCalendarDate=now;
@@ -230,7 +273,8 @@ function renderGoals(){
 function updateGoalSummary(){const summary=document.querySelector('#goals-summary');if(summary)summary.textContent=`已完成 ${completedGoals()} / 3`;}
 function setPublishedGames(value){
   if(!Number.isInteger(value)||value<0||value>PUBLISHED_GAME_TARGET){document.querySelector('#published-games-count').value=state.goals.publishedGames;toast('请输入 0 到 10 之间的整数');return;}
-  state.goals.publishedGames=value;save();
+  const previous=cloneState(state);state.goals.publishedGames=value;if(!save(previous)){render();return;}
+  value=state.goals.publishedGames;
   const done=value===PUBLISHED_GAME_TARGET;
   document.querySelector('#published-games-count').value=value;
   document.querySelector('#published-games-card').classList.toggle('checked',done);
@@ -291,8 +335,8 @@ function fixedExpenseDialog(id,frequency='monthly',sourceId=''){
   const values=record||source,period=record?.frequency||(source&&['monthly','yearly'].includes(source.frequency)?source.frequency:frequency);
   openDialog(record?'编辑固定支出':'添加固定支出',`<form id="fixed-expense-form" data-id="${esc(record?.id||'')}" data-source-id="${esc(sourceId)}"><p class="dialog-help">月付填每月金额，年付填每年金额。每个项目只需记录一次。</p><label class="field"><span>支出项目</span><input name="title" required maxlength="80" value="${esc(values?.title||'')}" placeholder="例如：百度会员、公司报账" autofocus></label><div class="field-row"><label class="field"><span>固定金额（元）</span><input name="amount" type="text" inputmode="decimal" required maxlength="12" value="${values?(values.amountCents/100).toFixed(2):''}" placeholder="0.00" autocomplete="off"></label><label class="field"><span>付款周期</span><select name="frequency"><option value="monthly" ${period==='monthly'?'selected':''}>每月一次</option><option value="yearly" ${period==='yearly'?'selected':''}>每年一次</option></select></label></div><label class="field"><span>备注（可选）</span><textarea name="note" maxlength="300" rows="2" placeholder="例如：续费时间、准备取消的原因">${esc(values?.note||'')}</textarea></label><p class="dialog-help">实际取消后，在清单勾选「已取消」，预计花销会随之减少。</p><p id="fixed-expense-error" class="expense-error" role="alert" hidden></p>${formActions('保存固定支出')}</form>`);
 }
-function commitExpenses(next){const previous=state.expenses;state.expenses=next;if(save())return true;state.expenses=previous;return false;}
-function commitFixedExpenses(next){const previous=state.fixedExpenses;state.fixedExpenses=next;if(save())return true;state.fixedExpenses=previous;return false;}
+function commitExpenses(next){const previous=cloneState(state);state.expenses=next;return save(previous);}
+function commitFixedExpenses(next){const previous=cloneState(state);state.fixedExpenses=next;return save(previous);}
 function setFixedExpenseCancelled(id,cancelled){
   if(typeof cancelled!=='boolean'||!state.fixedExpenses.some(x=>x.id===id))return false;
   return commitFixedExpenses(state.fixedExpenses.map(x=>x.id===id?{...x,cancelled}:x));
@@ -341,10 +385,87 @@ function renderProjects(){
   <aside class="timer-panel"><div class="timer-label">${icon('leaf')} 给想法一点专注时间</div><div class="timer-value" id="timer-value" role="timer" aria-label="剩余时间">${timerString(timerRemaining())}</div><div class="timer-options">${[10,15,25].map(n=>`<button data-action="timer-preset" data-minutes="${n}" class="${(t?t.totalSec/60:timerPreset)===n?'active':''}" ${t?'disabled':''}>${n} 分钟</button>`).join('')}</div><div class="timer-controls"><button class="primary-button" data-action="timer-toggle">${icon(active?'pause':'play')}${active?'暂停':t?'继续':'开始专注'}</button>${t?'<button class="secondary-button" data-action="timer-finish">结束</button>':''}</div><p class="timer-foot">${t?'可以随时停下来，已专注的时间会记下。':'从一小段时间开始，跟着自己的节奏。'}<br>今天已专注 ${minutes(today)} 分钟</p></aside></div>
   ${today.sessions.length?`<section class="panel" style="margin-top:22px"><h2 class="panel-title">今天的专注记录</h2>${today.sessions.slice().reverse().map(s=>`<div class="plan-row">${icon('clock')}<div>${esc(s.title||state.settings.projectName)}<small>${new Date(s.time).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}</small></div><span>${Math.floor(s.seconds/60)} 分 ${s.seconds%60} 秒</span></div>`).join('')}</section>`:''}</div></details>`;
 }
-function renderSettings(){return titleBlock('把这里，调成你的节奏','简单设置，照顾真实的自己。')+
+function renderCloudSettings(){
+  const heading=`<div class="section-title"><div><h2>记录同步</h2><p class="checklist-hint">勾选后自动保存，连接后同步到云端。</p></div><span class="pill">${cloudUser?'已登录':'本机记录'}</span></div>`;
+  const status=`<p class="cloud-status" id="cloud-status-message" role="status" aria-live="polite">${esc(cloudStatus.message)}</p>`;
+  if(!cloudConfigured)return `<section class="panel cloud-panel">${heading}${status}<p class="hint">当前勾选会立即保存在此设备，普通刷新会保留。跨设备和浏览器数据清理后的恢复，需要连接云端账户。</p></section>`;
+  if(!cloudUser)return `<section class="panel cloud-panel">${heading}${status}<p class="panel-description">使用同一个账户，就能在手机和电脑读取自己的记录。</p><form id="cloud-auth-form" class="cloud-auth-form"><label class="field"><span>邮箱</span><input name="email" type="email" required autocomplete="email" maxlength="254" placeholder="你的邮箱"></label><label class="field"><span>密码</span><input name="password" type="password" required minlength="6" autocomplete="current-password" placeholder="至少 6 位"></label><div class="settings-actions"><button class="primary-button" type="submit" value="signin" ${cloudBusy?'disabled':''}>${cloudBusy?'正在连接…':'登录'}</button><button class="secondary-button" type="submit" value="signup" ${cloudBusy?'disabled':''}>创建账户</button></div><p id="cloud-auth-message" class="hint" role="status">${esc(cloudAuthMessage||'首次创建账户，请使用开通云数据库时绑定的邮箱。登录后可选择合并本机记录，或使用已有云端记录。')}</p></form></section>`;
+  const setup=cloudNeedsSetup||storageBlocked;
+  return `<section class="panel cloud-panel">${heading}<p class="cloud-account">${esc(cloudUser.email||'我的账户')}</p>${status}${setup?`<div class="info-box">生活记录、目标和花销会保存到你的 Supabase 账户。首次连接前，请选择要保留的记录。${storageBlocked?'<br>本机记录读取异常，请先导出原始备份，再使用云端记录恢复。':''}</div><div class="settings-actions"><button class="primary-button" data-action="cloud-merge" ${cloudBusy||storageBlocked?'disabled':''}>合并本机记录并开启同步</button><button class="secondary-button" data-action="cloud-use" ${cloudBusy?'disabled':''}>使用云端记录</button></div>`:`<p class="hint">勾选后会立即同步。离线时先保存在此设备，网络恢复后自动重试。只有云端确认保存后，才会显示「已同步到云端」。</p><div class="settings-actions"><button class="secondary-button" data-action="cloud-retry" ${cloudBusy?'disabled':''}>立即同步 / 重试</button></div>`}<div class="cloud-bottom"><span class="hint">${cloudStatus.updatedAt?'上次云端确认：'+esc(new Date(cloudStatus.updatedAt).toLocaleString('zh-CN')):'尚未收到云端保存确认'}</span><button class="text-button" data-action="cloud-logout" ${cloudBusy?'disabled':''}>退出登录</button></div></section>`;
+}
+function handleCloudStatus(next){cloudStatus=next;if(next.phase==='setup')cloudNeedsSetup=true;if(next.phase==='synced'||next.phase==='local')cloudNeedsSetup=false;updateSaveIndicator();if(view==='settings')renderWhenSafe();}
+function restoreWithRecentChanges(before,current,incoming){
+  if(JSON.stringify(before)===JSON.stringify(current))return incoming===undefined?undefined:cloneState(incoming);
+  if(Array.isArray(current))return SlowdayPersistence.merge(Array.isArray(before)?before:[],current,Array.isArray(incoming)?incoming:[]);
+  if(current&&typeof current==='object'){
+    const result=incoming&&typeof incoming==='object'&&!Array.isArray(incoming)?cloneState(incoming):{};
+    for(const key of new Set([...Object.keys(before||{}),...Object.keys(current)])){
+      if(!Object.prototype.hasOwnProperty.call(current,key)){delete result[key];continue;}
+      if(JSON.stringify(before?.[key])!==JSON.stringify(current[key]))result[key]=restoreWithRecentChanges(before?.[key],current[key],result[key]);
+    }
+    return result;
+  }
+  return current;
+}
+function applyCloudRecords(next){
+  const restored=cloudReplaceAllowed?validateState(restoreWithRecentChanges(cloudRestoreBase||state,state,next)):next;
+  const result=cloudReplaceAllowed?{ok:replaceLocalRecords(restored),state}:storageBlocked?{ok:false}:localStore.save(next);
+  if(!result.ok){if(['INVALID_DATA','MISSING_DATA'].includes(result.error?.code))blockMissingOrInvalidStorage(result.error);return false;}
+  state=result.state;cloudReplaceAllowed=false;localWriteError='';renderWhenSafe();return true;
+}
+async function handleCloudSession(session){
+  const nextUser=session?.user||null;
+  if(cloudUser?.id===nextUser?.id&&cloudUser!==null)return;
+  cloudUser=nextUser;cloudNeedsSetup=false;
+  if(!cloudEngine)return;
+  await cloudEngine.connect(nextUser,{resume:!storageBlocked&&!!rawBackup});
+  if(view==='settings')renderWhenSafe();
+}
+async function initializeCloud(){
+  if(!cloudConfigured)return;
+  try{
+    if(!globalThis.SlowdaySupabase?.createClient||!globalThis.SlowdayCloud?.create)throw new Error('同步组件未能加载，请刷新重试');
+    cloudClient=SlowdaySupabase.createClient(cloudConfig.url,cloudConfig.publishableKey,{auth:{autoRefreshToken:true,persistSession:true,detectSessionInUrl:true}});
+    cloudEngine=SlowdayCloud.create({client:cloudClient,storage:localStorage,getState:()=>state,refreshState:refreshLocalRecords,applyState:applyCloudRecords,onStatus:handleCloudStatus,validate:validateState,blank:blankState,merge:SlowdayPersistence.merge});
+    cloudClient.auth.onAuthStateChange((_event,session)=>{setTimeout(()=>{void handleCloudSession(session);},0);});
+    const {data,error}=await cloudClient.auth.getSession();if(error)throw error;
+    await handleCloudSession(data.session);
+    if(cloudAuthReturn){history.replaceState(null,'',location.pathname+'#settings');view='settings';renderWhenSafe();}
+  }catch(error){cloudStatus={phase:'error',message:'云端暂时无法连接，记录仍保存在此设备。'};cloudAuthMessage=error.message||'连接失败，请刷新重试';updateSaveIndicator();if(view==='settings')renderWhenSafe();}
+}
+async function submitCloudAuth(form,mode){
+  if(cloudBusy||!cloudClient)return;
+  const data=new FormData(form),email=String(data.get('email')||'').trim(),password=String(data.get('password')||'');
+  if(!email||password.length<6)return;
+  cloudBusy=true;cloudAuthMessage='正在连接…';form.querySelectorAll('button').forEach(b=>b.disabled=true);
+  const message=form.querySelector('#cloud-auth-message');message.textContent=cloudAuthMessage;
+  try{
+    const redirect=new URL(location.href);redirect.search='';redirect.hash='settings';
+    const result=mode==='signup'?await cloudClient.auth.signUp({email,password,options:{emailRedirectTo:redirect.href}}):await cloudClient.auth.signInWithPassword({email,password});
+    if(result.error)throw result.error;
+    form.reset();document.activeElement?.blur?.();
+    cloudAuthMessage=mode==='signup'&&!result.data.session?'账户已创建，请到邮箱点击确认链接，再回来登录。':'登录成功，请选择记录同步方式。';
+    if(result.data.session)await handleCloudSession(result.data.session);
+  }catch(error){cloudAuthMessage=error.code==='email_address_not_authorized'?'请使用开通云数据库时绑定的邮箱创建账户。':/invalid login credentials/i.test(error.message||'')?'邮箱或密码不正确，请检查后重试。':/email not confirmed/i.test(error.message||'')?'请先打开邮箱中的确认链接。':/rate limit/i.test(error.message||'')?'请求较频繁，请稍后再试。':'未能登录：'+(error.message||'请检查网络后重试');}
+  finally{cloudBusy=false;if(form.isConnected){form.querySelectorAll('button').forEach(b=>b.disabled=false);message.textContent=cloudAuthMessage;}renderWhenSafe();}
+}
+async function activateCloud(mode){
+  if(cloudBusy||!cloudEngine||!cloudUser)return;
+  cloudBusy=true;cloudReplaceAllowed=mode==='cloud';cloudRestoreBase=cloudReplaceAllowed?cloneState(state):null;
+  try{const success=await cloudEngine.activate(mode);if(success&&cloudReplaceAllowed){if(!replaceLocalRecords(state))throw new Error('恢复未能保存');}if(success)toast('记录已连接到云端');}
+  catch(_){toast('连接未完成，现有记录已保留');}
+  finally{cloudReplaceAllowed=false;cloudRestoreBase=null;cloudBusy=false;renderWhenSafe();}
+}
+async function signOutCloud(){
+  if(!cloudClient||cloudBusy)return;cloudBusy=true;cloudEngine?.stop();
+  try{const {error}=await cloudClient.auth.signOut({scope:'local'});if(error)throw error;cloudUser=null;cloudAuthMessage='已退出登录，本机记录仍然保留。';}
+  catch(error){cloudAuthMessage='退出未完成，请重试';if(cloudUser)await cloudEngine.connect(cloudUser,{resume:!storageBlocked});toast(cloudAuthMessage);}
+  finally{cloudBusy=false;renderWhenSafe();}
+}
+function renderSettings(){return titleBlock('把这里，调成你的节奏','简单设置，照顾真实的自己。')+renderCloudSettings()+
   `<div class="settings-grid"><section class="panel"><h2 class="panel-title">我的偏好</h2><p class="panel-description">所有目标都可以按自己的需要调整。</p><form id="preferences-form"><label class="field"><span>怎么称呼你</span><input name="name" maxlength="30" value="${esc(state.settings.name)}" placeholder="你的名字或昵称"></label><label class="field"><span>个人饮水参考目标（ml）</span><input name="waterGoal" type="number" min="0" max="10000" step="50" value="${state.settings.waterGoal}" inputmode="numeric"><small>填 0 只记录总量；这里的目标由你自己决定。</small></label><label class="field"><span>步骤与专注的项目名称</span><input name="projectName" required maxlength="80" value="${esc(state.settings.projectName)}"></label><button class="primary-button" type="submit">${icon('check')}保存偏好</button></form></section>
   <section class="panel"><div class="section-title"><h2>我的补剂安排</h2><button class="text-button" data-action="supplement-add">${icon('plus')}添加</button></div><p class="panel-description">记录已有的安排，不生成补剂或用量建议。</p><div class="plan-list">${supplementRows()}</div><div class="info-box">补剂名称和备注都由你填写。每天在「今日」页面点选已使用的项目，记录会按日期保存。</div></section>
-  <section class="panel"><h2 class="panel-title">记录与备份</h2><p class="panel-description">生活记录和花销保存在当前浏览器中。</p><div class="info-box">换设备、换浏览器或清除浏览器数据后，记录不会自动同步。可以先导出备份，再在新设备导入。</div><div class="settings-actions"><button class="secondary-button" data-action="export">${icon('download')}${storageBlocked?'导出原始备份':'导出备份'}</button><button class="secondary-button" data-action="import">${icon('upload')}导入备份</button><input type="file" id="import-file" accept=".json,application/json" hidden></div><p class="data-foot">已保存 ${Object.values(state.days).filter(hasRecord).length} 天的记录 · ${state.tasks.length} 个项目步骤 · ${state.fixedExpenses.length} 项固定支出 · ${state.expenses.length} 笔旧版花销<br>备份格式：JSON。导入前会确认，并提供现有数据备份。</p></section>
+  <section class="panel"><h2 class="panel-title">记录与备份</h2><p class="panel-description">勾选后立即保存，普通刷新会保留记录。</p><div class="info-box">已连接云端时，换设备后登录同一个账户即可读取记录。尚未连接时，记录只在当前浏览器中；清理浏览器数据前，请先导出备份。</div><div class="settings-actions"><button class="secondary-button" data-action="export">${icon('download')}${storageBlocked?'导出原始备份':'导出备份'}</button><button class="secondary-button" data-action="import">${icon('upload')}导入备份</button><input type="file" id="import-file" accept=".json,application/json" hidden></div><p class="data-foot">已保存 ${Object.values(state.days).filter(hasRecord).length} 天的记录 · ${state.tasks.length} 个项目步骤 · ${state.fixedExpenses.length} 项固定支出 · ${state.expenses.length} 笔旧版花销<br>备份格式：JSON。导入前会确认，并提供现有数据备份。</p></section>
   <section class="panel"><h2 class="panel-title">一个轻一点的生活空间</h2><p class="panel-description">一天做好一件事，也可以很好。</p><p class="info-box">这里没有连续打卡排名，也没有必须填满的清单。按需记录，允许空白。让工具替你记住小事，把注意力留给生活。</p><p class="hint">手机使用：可以通过浏览器的「添加到主屏幕」把本站放在桌面。是否支持安装取决于浏览器。</p><p class="version-label">慢慢来 · 网页版 1.0</p></section></div>`;}
 function supplementRows(){return state.supplementPlan.length?state.supplementPlan.map(p=>`<div class="plan-row"><div>${esc(p.name)}${p.note?`<small>${esc(p.note)}</small>`:''}</div><button class="icon-button" data-action="supplement-edit" data-id="${esc(p.id)}" aria-label="编辑补剂 ${esc(p.name)}">${icon('edit')}</button><button class="icon-button" data-action="supplement-delete" data-id="${esc(p.id)}" aria-label="删除补剂 ${esc(p.name)}">${icon('trash')}</button></div>`).join(''):'<p class="hint">还没有添加补剂。有需要时再添加就好。</p>';}
 function openDialog(title,body){document.querySelector('#dialog-content').innerHTML=`<div class="dialog-inner"><div class="dialog-header"><h2 id="dialog-title">${esc(title)}</h2><button class="icon-button" data-action="dialog-close" aria-label="关闭">${icon('close')}</button></div>${body}</div>`;if(!dialog.open)dialog.showModal();}
@@ -357,11 +478,15 @@ function supplementDialog(id){const p=state.supplementPlan.find(x=>x.id===id);op
 function taskDialog(id){const t=state.tasks.find(x=>x.id===id);openDialog(t?'编辑这一小步':'添加下一小步',`<form id="task-form" data-id="${esc(t?.id||'')}"><label class="field"><span>具体要做什么</span><input name="title" maxlength="150" required value="${esc(t?.title||'')}" placeholder="比如：画好游戏里的第一个角色" autofocus></label><label class="field"><span>当前状态</span><select name="status">${[['todo','下一小步'],['doing','正在做'],['done','已经做好']].map(([k,l])=>`<option value="${k}" ${t?.status===k?'selected':''}>${l}</option>`).join('')}</select></label>${formActions('保存步骤')}</form>`);}
 let pendingConfirm=null,pendingImport=null;
 function confirmAction(title,message,action,label='确认删除'){pendingConfirm=action;openDialog(title,`<p class="dialog-help">${esc(message)}</p><div class="dialog-actions"><button class="secondary-button" data-action="dialog-close">取消</button><button class="primary-button" data-action="confirm">${label}</button></div>`);}
-function finishTimer(){const t=state.timer;if(!t)return;const spent=Math.max(0,Math.min(t.totalSec,t.totalSec-timerRemaining()));if(spent>0){day(t.day).sessions.push({id:uid(),seconds:spent,title:t.title,time:new Date().toISOString()});day(t.day).checks.game=true;}state.timer=null;save();if(view==='projects'||view==='today'||view==='history')render();toast(spent>0?`记下了 ${Math.floor(spent/60)} 分 ${spent%60} 秒专注。休息一下吧。`:'已结束，这次没有记录时长');}
+function finishTimer(){const t=state.timer;if(!t)return;const previous=cloneState(state),spent=Math.max(0,Math.min(t.totalSec,t.totalSec-timerRemaining()));if(spent>0){day(t.day).sessions.push({id:uid(),seconds:spent,title:t.title,time:new Date().toISOString()});day(t.day).checks.game=true;}state.timer=null;const saved=save(previous);if(view==='projects'||view==='today'||view==='history')render();if(saved)toast(spent>0?`记下了 ${Math.floor(spent/60)} 分 ${spent%60} 秒专注。休息一下吧。`:'已结束，这次没有记录时长');}
 function downloadBackup(){const contents=storageBlocked&&rawBackup?rawBackup:JSON.stringify({...state,exportedAt:new Date().toISOString()},null,2);const blob=new Blob([contents],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`慢慢来-备份-${localDate()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);}
 document.addEventListener('click',event=>{
-  const b=event.target.closest('[data-action]');if(!b||b.disabled)return;const action=b.dataset.action,id=b.dataset.id,key=b.dataset.key;const d=day();
+  const b=event.target.closest('[data-action]');if(!b||b.disabled)return;const action=b.dataset.action,id=b.dataset.id,key=b.dataset.key;const previous=cloneState(state),d=day();
   switch(action){
+    case 'cloud-merge':void activateCloud('merge');return;
+    case 'cloud-use':confirmAction('使用云端记录？','这会用当前账户的云端记录替换本机记录。确认时会先下载一份本机备份；请保留下载的文件。',()=>{downloadBackup();void activateCloud('cloud');},'备份本机并使用云端记录');return;
+    case 'cloud-retry':refreshLocalRecords();void cloudEngine?.sync();return;
+    case 'cloud-logout':if(cloudEngine?.hasPending()||cloudStatus.phase==='syncing'||cloudStatus.phase==='error'){confirmAction('退出前保留未同步记录？','仍有记录尚未确认同步。先下载备份再退出，本机记录会保留；重新登录此账户后可以继续同步。',()=>{downloadBackup();void signOutCloud();},'下载备份并退出');}else void signOutCloud();return;
     case 'fixed-add':fixedExpenseDialog(null,b.dataset.frequency||'monthly');return;
     case 'fixed-edit':fixedExpenseDialog(id);return;
     case 'fixed-from-legacy':fixedExpenseDialog(null,'monthly',id);return;
@@ -385,21 +510,21 @@ document.addEventListener('click',event=>{
     case 'water-add':d.water.push({id:uid(),ml:+b.dataset.amount,time:new Date().toISOString()});d.checks.water=true;toast('记下一杯水');break;
     case 'water-undo':d.water.pop();toast('已撤销上一笔');break;
     case 'water-edit':waterDialog();return;
-    case 'water-delete':d.water=d.water.filter(x=>x.id!==id);save();render();waterDialog();return;
+    case 'water-delete':d.water=d.water.filter(x=>x.id!==id);save(previous);render();waterDialog();return;
     case 'meal':d.meals[key]=!d.meals[key];if(d.meals[key])d.checks.meals=true;break;
     case 'skin':d.skin[key]=!d.skin[key];if(d.skin[key])d.checks.skin=true;break;
     case 'exercise-edit':exerciseDialog();return;
-    case 'exercise-delete':d.exercise=d.exercise.filter(x=>x.id!==id);save();render();exerciseDialog();return;
+    case 'exercise-delete':d.exercise=d.exercise.filter(x=>x.id!==id);save(previous);render();exerciseDialog();return;
     case 'sleep-edit':sleepDialog();return;
     case 'sleep-clear':d.sleep=null;dialog.close();break;
     case 'supplement-toggle':d.supplements=d.supplements.includes(id)?d.supplements.filter(x=>x!==id):[...d.supplements,id];if(d.supplements.includes(id))d.checks.supplements=true;break;
     case 'supplements-manage':openDialog('我的补剂安排',`<div class="plan-list">${supplementRows()}</div><button class="primary-button" data-action="supplement-add">${icon('plus')}添加补剂</button>`);return;
     case 'supplement-add':supplementDialog();return;
     case 'supplement-edit':supplementDialog(id);return;
-    case 'supplement-delete':confirmAction('移除这项补剂安排？','移除后不再出现在每日列表，已保存的历史打卡仍会保留。',()=>{state.supplementPlan=state.supplementPlan.filter(x=>x.id!==id);save();render();});return;
+    case 'supplement-delete':confirmAction('移除这项补剂安排？','移除后不再出现在每日列表，已保存的历史打卡仍会保留。',()=>{const before=cloneState(state);state.supplementPlan=state.supplementPlan.filter(x=>x.id!==id);save(before);render();});return;
     case 'task-add':taskDialog();return;
     case 'task-edit':taskDialog(id);return;
-    case 'task-delete':confirmAction('删除这个项目步骤？','这会移除这个步骤，已记录的专注时间会保留。',()=>{state.tasks=state.tasks.filter(x=>x.id!==id);save();render();});return;
+    case 'task-delete':confirmAction('删除这个项目步骤？','这会移除这个步骤，已记录的专注时间会保留。',()=>{const before=cloneState(state);state.tasks=state.tasks.filter(x=>x.id!==id);save(before);render();});return;
     case 'project-edit':openDialog('给小游戏起个名字',`<form id="project-form"><label class="field"><span>项目名称</span><input name="name" value="${esc(state.settings.projectName)}" maxlength="80" required autofocus></label>${formActions('保存名称')}</form>`);return;
     case 'timer-preset':timerPreset=+b.dataset.minutes;render();return;
     case 'timer-toggle':{
@@ -413,13 +538,13 @@ document.addEventListener('click',event=>{
     case 'import':document.querySelector('#import-file').click();return;
     case 'import-apply':{
       if(!pendingImport)return;downloadBackup();
-      const previous=state,wasBlocked=storageBlocked;state={...pendingImport,timer:null};storageBlocked=false;
-      if(!save()){state=previous;storageBlocked=wasBlocked;toast('未能恢复备份，当前记录已保留，请检查浏览器存储空间');return;}
+      if(!replaceLocalRecords({...pendingImport,timer:null})){toast('未能恢复备份，当前记录已保留，请检查浏览器存储空间');return;}
+      cloudEngine?.note();
       pendingImport=null;dialog.close();render();toast('备份已恢复，原有记录已导出');return;
     }
     default:return;
   }
-  save();render();
+  save(previous);render();
 });
 document.addEventListener('input',event=>{
   if(event.target.id==='daily-note'){day().note=event.target.value;const ok=save();document.querySelector('#note-status').textContent=ok?'已保存':'保存失败，请导出备份';document.querySelector('#note-count').textContent=`${event.target.value.length} / 3000`;}
@@ -433,31 +558,33 @@ document.addEventListener('change',async event=>{
   }
   if(el.dataset.goalCheck){
     const key=el.dataset.goalCheck;if(!PERSONAL_GOALS.some(g=>g.id===key))return;
-    state.goals[key]=el.checked;save();
+    const previous=cloneState(state);state.goals[key]=el.checked;if(!save(previous)){el.checked=state.goals[key];render();return;}
     const row=el.closest('.checklist-row');row.classList.toggle('checked',el.checked);row.querySelector('.checklist-state').textContent=el.checked?'已完成':'勾选完成';updateGoalSummary();return;
   }
   if(el.id==='published-games-count'){setPublishedGames(el.value===''?NaN:Number(el.value));return;}
   if(el.dataset.gameCheck){
     const key=el.dataset.gameCheck;if(!GAME_PROJECTS.some(p=>p.id===key))return;
-    state.gameChecks[key]=el.checked;save();
+    const previous=cloneState(state);state.gameChecks[key]=el.checked;if(!save(previous)){el.checked=state.gameChecks[key]===true;render();return;}
     const row=el.closest('.checklist-row');row.classList.toggle('checked',el.checked);row.querySelector('.checklist-state').textContent=el.checked?'已完成':'勾选完成';
     document.querySelector('#game-checklist-summary').textContent=`已完成 ${completedGames()} / ${GAME_PROJECTS.length}`;return;
   }
   if(el.dataset.dailyCheck){
     const key=el.dataset.dailyCheck;if(!CHECKLIST.some(x=>x.key===key))return;
-    const d=day();d.checks[key]=el.checked;save();
+    const previous=cloneState(state);day().checks[key]=el.checked;if(!save(previous)){el.checked=isChecked(day(),key);render();return;}const d=day();
     const row=el.closest('.checklist-row');row.classList.toggle('checked',el.checked);row.querySelector('.checklist-state').textContent=el.checked?'已做过':'勾选';
     const count=entryCount(d);document.querySelector('#checklist-summary').textContent=count?`已记下 ${count} 件小事`:'做多少，记多少';return;
   }
   if(el.id==='record-date'){if(validDate(el.value)&&el.value<=localDate()&&el.value>='2000-01-01'){selectedDate=el.value;render();}else{el.value=selectedDate;toast('请选择今天或之前的日期');}}
-  if(el.dataset.taskStatus){const task=state.tasks.find(x=>x.id===el.dataset.taskStatus);if(task){if(task.status!=='done'&&el.value==='done')day(localDate()).checks.game=true;task.status=el.value;save();render();}}
+  if(el.dataset.taskStatus){const task=state.tasks.find(x=>x.id===el.dataset.taskStatus);if(task){const previous=cloneState(state);if(task.status!=='done'&&el.value==='done')day(localDate()).checks.game=true;task.status=el.value;save(previous);render();}}
   if(el.id==='import-file'){
     const file=el.files[0];el.value='';if(!file)return;
     try{if(file.size>25*1024*1024)throw new Error('文件超过 25 MB，请选择较小的备份');pendingImport=validateState(JSON.parse(await file.text()));openDialog('恢复这份备份？',`<p class="dialog-help">文件：${esc(file.name)}<br>包含 ${Object.values(pendingImport.days).filter(hasRecord).length} 天记录、${pendingImport.tasks.length} 个项目步骤、${pendingImport.fixedExpenses.length} 项固定支出、${pendingImport.expenses.length} 笔旧版花销，目标进度也会一并恢复。</p><div class="info-box">导入会替换当前设备的记录，专注计时会停止。点击恢复时会先下载一份现有数据备份。</div><div class="dialog-actions"><button class="secondary-button" data-action="dialog-close">取消</button><button class="primary-button" data-action="import-apply">备份现有数据并恢复</button></div>`);}catch(error){pendingImport=null;toast('未导入：'+(error instanceof SyntaxError?'文件不是有效的 JSON 备份':error.message));}
   }
 });
 document.addEventListener('submit',event=>{
-  const f=event.target;if(!f.id.endsWith('-form'))return;event.preventDefault();const data=new FormData(f),get=k=>String(data.get(k)||'').trim();const d=day();
+  const f=event.target;if(!f.id.endsWith('-form'))return;event.preventDefault();
+  if(f.id==='cloud-auth-form'){void submitCloudAuth(f,event.submitter?.value||'signin');return;}
+  const data=new FormData(f),get=k=>String(data.get(k)||'').trim(),previous=cloneState(state),d=day();
   switch(f.id){
     case 'fixed-expense-form':submitFixedExpenseForm(f,get);return;
     case 'focus-form':{const value=get('text');if(!value)return;d.focus={text:value,done:value===d.focus.text?d.focus.done:false};break;}
@@ -470,12 +597,18 @@ document.addEventListener('submit',event=>{
     case 'preferences-form':if(!get('projectName'))return;state.settings={name:get('name'),waterGoal:+get('waterGoal'),projectName:get('projectName')};break;
     default:return;
   }
-  const saved=save();dialog.close();render();if(saved)toast(f.id==='preferences-form'?'偏好已保存':'记下了，按自己的节奏就好');
+  const saved=save(previous);if(!saved)return;dialog.close();render();toast(f.id==='preferences-form'?'偏好已保存':'记下了，按自己的节奏就好');
 });
 dialog.addEventListener('click',event=>{if(event.target===dialog){const rect=dialog.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom){dialog.close();pendingConfirm=null;pendingImport=null;}}});
 dialog.addEventListener('cancel',()=>{pendingConfirm=null;pendingImport=null;});
 document.addEventListener('toggle',event=>{if(event.target.id==='optional-records')detailRecordsOpen=event.target.open;if(event.target.id==='project-details')projectDetailsOpen=event.target.open;if(event.target.id==='legacy-expenses')legacyExpensesOpen=event.target.open;},true);
 window.addEventListener('hashchange',()=>{const next=location.hash.slice(1);if(navItems.some(x=>x[0]===next)&&next!==view){view=next;render();}});
-document.addEventListener('visibilitychange',()=>{if(!document.hidden){refreshDailyDate();refreshActionPeriod();if(state.timer?.endAt&&timerRemaining()===0)finishTimer();}});
-setInterval(()=>{refreshDailyDate();refreshActionPeriod();if(state.timer?.endAt){const left=timerRemaining();const el=document.querySelector('#timer-value');if(el)el.textContent=timerString(left);if(left===0)finishTimer();}},1000);
-render();if(initialError)toast(initialError);if(state.timer?.endAt&&timerRemaining()===0)finishTimer();
+window.addEventListener('storage',event=>{if(event.key===STORAGE_KEY)refreshLocalRecords();if(event.key==='slowday.cloud.owner.v1'&&cloudUser&&event.newValue?.replace(/^setup:/,'')!==cloudUser.id){void cloudEngine?.connect(cloudUser,{resume:false});}});
+window.addEventListener('focus',()=>{refreshLocalRecords();void cloudEngine?.sync();});
+window.addEventListener('online',()=>{refreshLocalRecords();void cloudEngine?.sync();});
+document.addEventListener('focusout',()=>{setTimeout(()=>{if(pendingExternalRender&&!editingForm())renderWhenSafe();},0);});
+dialog.addEventListener('close',()=>{if(pendingExternalRender)renderWhenSafe();});
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){refreshLocalRecords();refreshDailyDate();refreshActionPeriod();void cloudEngine?.sync();if(state.timer?.endAt&&timerRemaining()===0)finishTimer();}});
+setInterval(()=>{if(!document.hidden)void cloudEngine?.sync();},60000);
+setInterval(()=>{refreshDailyDate();refreshActionPeriod();if(state.timer?.endAt){const left=timerRemaining();const el=document.querySelector('#timer-value');if(el)el.textContent=timerString(left);if(left===0&&!storageBlocked&&!localWriteError)finishTimer();}},1000);
+render();if(initialError)toast(initialError);if(state.timer?.endAt&&timerRemaining()===0)finishTimer();void initializeCloud();
