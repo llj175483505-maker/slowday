@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#f6f7f2">
+  <meta name="description" content="慢慢来，今天也在好好生活。记录日常照顾，把精力留给一件重要的事。">
+  <title>慢慢来 · 个人生活手记</title>
+  <link rel="icon" type="image/svg+xml" href="./icon.svg">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <aside class="sidebar">
+    <a class="brand" href="#today" aria-label="慢慢来首页"><span class="brand-mark"><svg viewBox="0 0 32 32" fill="none"><path d="M16 25V13M16 18C6 20 5 10 5 7c8-1 12 5 11 11ZM16 14C16 6 22 4 28 4c0 9-5 12-12 10Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>慢慢来<small>A LITTLE, EVERY DAY</small></span></a>
+    <div class="nav-caption">我的生活空间</div>
+    <nav id="nav" aria-label="主导航"></nav>
+    <div class="sidebar-bottom"><div class="sidebar-quote"><span>“</span><p>生活有自己的节奏，<br>你也可以。</p><div class="tiny-line"></div></div><button class="profile" data-action="nav" data-view="settings"><span class="avatar" id="avatar">我</span><span><b id="profile-name">我的小天地</b><small>给自己留一点时间</small></span><span class="profile-arrow">↗</span></button></div>
+  </aside>
+  <div class="app-shell"><header class="topbar"><div class="breadcrumb"><span class="brand-mobile">慢慢来</span><span class="desktop-label">我的生活空间</span><span class="crumb-divider">/</span><b id="page-label">今日</b></div><span class="saved-state" id="saved-state"><i></i>已在此设备保存</span><button class="icon-button settings-shortcut" data-action="nav" data-view="settings" aria-label="设置" id="settings-icon"></button></header><main id="main" tabindex="-1"></main><footer class="page-footer">一点一滴，也在向前。<span>按自己的节奏就好 <span aria-hidden="true">✳</span></span></footer></div>
+  <nav class="mobile-nav" id="mobile-nav" aria-label="手机导航"></nav>
+  <dialog id="dialog" aria-labelledby="dialog-title"><div id="dialog-content"></div></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="./app.js" defer></script>
+</body>
+</html>
