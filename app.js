@@ -1,5 +1,10 @@
 'use strict';
 const STORAGE_KEY = 'slowday.personal.v1';
+const GAME_PROJECTS = Object.freeze([
+  {id:'taprush',name:'taprush',platform:'TK'},
+  {id:'tkcarsurvival',name:'TKCarSurvival',platform:'TK'},
+  {id:'pinrush',name:'pinrush',platform:'TK'}
+]);
 const paths = {
   sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/>',
   home:'<path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-8H9v8H4a1 1 0 0 1-1-1Z"/>',
@@ -50,11 +55,12 @@ const CHECKLIST = [
   {key:'game',icon:'game',name:'开发小游戏',hint:'推进了一小步，就算做过'}
 ];
 const blankDay = () => ({checks:{},energy:null,focus:{text:'',done:false},water:[],meals:{breakfast:false,lunch:false,dinner:false},exercise:[],sleep:null,supplements:[],skin:{am:false,pm:false},note:'',sessions:[]});
-const blankState = () => ({version:1,settings:{name:'',waterGoal:0,projectName:'我的第一个小游戏'},supplementPlan:[],tasks:[],days:{},timer:null});
+const blankState = () => ({version:1,settings:{name:'',waterGoal:0,projectName:'我的第一个小游戏'},gameChecks:{},supplementPlan:[],tasks:[],days:{},timer:null});
 function validateState(raw){
   if(!raw || raw.version!==1 || typeof raw.days!=='object' || !raw.days || Array.isArray(raw.days)) throw new Error('不是慢慢来的有效备份文件');
   const s=blankState(); const text=(v,n=300)=>typeof v==='string'?v.slice(0,n):'';
   const number=(v,min,max)=>typeof v==='number' && Number.isFinite(v) && v>=min && v<=max;
+  for(const {id} of GAME_PROJECTS){if(typeof raw.gameChecks?.[id]==='boolean')s.gameChecks[id]=raw.gameChecks[id];}
   s.settings={name:text(raw.settings?.name,30),waterGoal:number(raw.settings?.waterGoal,0,10000)?raw.settings.waterGoal:0,projectName:text(raw.settings?.projectName,80)||'我的第一个小游戏'};
   s.supplementPlan=(Array.isArray(raw.supplementPlan)?raw.supplementPlan:[]).slice(0,100).filter(x=>x&&typeof x.id==='string'&&x.name).map(x=>({id:text(x.id,100),name:text(x.name,50),note:text(x.note,120)}));
   s.tasks=(Array.isArray(raw.tasks)?raw.tasks:[]).slice(0,2000).filter(x=>x&&typeof x.id==='string'&&x.title).map(x=>({id:text(x.id,100),title:text(x.title,150),status:['todo','doing','done'].includes(x.status)?x.status:'todo',createdAt:text(x.createdAt,40)}));
@@ -81,7 +87,7 @@ try{rawBackup=localStorage.getItem(STORAGE_KEY)||'';state=rawBackup?validateStat
 let selectedDate=localDate();
 let currentCalendarDate=localDate();
 let view=['today','history','projects','settings'].includes(location.hash.slice(1))?location.hash.slice(1):'today';
-let timerPreset=15,toastTimeout,detailRecordsOpen=false;
+let timerPreset=15,toastTimeout,detailRecordsOpen=false,projectDetailsOpen=!!state.timer;
 const main=document.querySelector('#main'),dialog=document.querySelector('#dialog');
 function day(key=selectedDate){if(!state.days[key])state.days[key]=blankDay();return state.days[key];}
 function save(){
@@ -154,7 +160,7 @@ function renderToday(){
       <article class="habit-card supplements">${cardHeader('pill','补剂记录','YOUR OWN ROUTINE',`<button class="text-button" data-action="supplements-manage">管理</button>`)}${state.supplementPlan.length?`<div class="supp-list">${state.supplementPlan.map(p=>`<button class="supp-item ${d.supplements.includes(p.id)?'checked':''}" data-action="supplement-toggle" data-id="${esc(p.id)}" aria-pressed="${d.supplements.includes(p.id)}" title="${esc(p.note)}"><span class="check-circle">${d.supplements.includes(p.id)?'✓':''}</span>${esc(p.name)}</button>`).join('')}</div><p class="card-note">点击记录，再点可撤销。</p>`:`<p class="supp-empty">按自己的安排添加</p><p class="card-note">这里只记录你已有的补剂计划</p><div class="card-actions"><button class="secondary-button" data-action="supplement-add">${icon('plus')}添加补剂</button></div>`}</article>
       <article class="habit-card skin">${cardHeader('skin','照顾皮肤','A MOMENT FOR YOU')}<div class="subtle-stat">${d.skin.am&&d.skin.pm?'今天也照顾好了':'给自己一点呵护'}</div><div class="check-options">${checkChip('skin','am','早间',d.skin.am)}${checkChip('skin','pm','晚间',d.skin.pm)}</div><p class="card-note" style="margin-top:auto;padding-top:14px">简单一点，舒服就好。</p></article>
     </div></section></details>
-    <section class="bottom-grid"><article class="project-preview"><div class="project-top"><h2 class="project-title">${icon('game')} 做一点小游戏</h2><button class="text-button" data-action="nav" data-view="projects">进入项目 ${icon('arrow')}</button></div><h3>${esc(state.settings.projectName)}</h3><p class="project-next">${nextTask?'下一小步：'+esc(nextTask.title):'从一个小想法开始，下一步由你决定。'}</p><div class="project-meta"><span>${state.tasks.filter(t=>t.status==='done').length} / ${state.tasks.length} 个小步骤已完成</span><span>${isToday?'今日':'当日'}专注 ${minutes(d)} 分钟</span></div></article><article class="journal-card"><div class="project-top"><h2 class="project-title">${icon('journal')} 留一句给自己</h2><span class="hint">随手记</span></div><label class="visually-hidden" for="daily-note">当天随手记</label><textarea id="daily-note" maxlength="3000" placeholder="今天有什么小小的开心？\n或者，只写一句“今天辛苦了”。">${esc(d.note)}</textarea><div class="journal-bottom"><span id="note-status">输入后自动保存</span><span id="note-count">${d.note.length} / 3000</span></div></article></section>`;
+    <section class="bottom-grid"><article class="project-preview"><div class="project-top"><h2 class="project-title">${icon('game')} 做一点小游戏</h2><button class="text-button" data-action="nav" data-view="projects">进入项目 ${icon('arrow')}</button></div><h3>TK · 小游戏</h3><p class="project-next">${GAME_PROJECTS.map(p=>p.name).join(' · ')}</p><div class="project-meta"><span>已完成 ${completedGames()} / ${GAME_PROJECTS.length} 个小游戏</span><span>${isToday?'今日':'当日'}专注 ${minutes(d)} 分钟</span></div></article><article class="journal-card"><div class="project-top"><h2 class="project-title">${icon('journal')} 留一句给自己</h2><span class="hint">随手记</span></div><label class="visually-hidden" for="daily-note">当天随手记</label><textarea id="daily-note" maxlength="3000" placeholder="今天有什么小小的开心？\n或者，只写一句“今天辛苦了”。">${esc(d.note)}</textarea><div class="journal-bottom"><span id="note-status">输入后自动保存</span><span id="note-count">${d.note.length} / 3000</span></div></article></section>`;
 }
 function recentDays(){return Array.from({length:7},(_,i)=>shiftDate(localDate(),i-6));}
 function renderHistory(){
@@ -166,16 +172,20 @@ function renderHistory(){
 }
 function timerRemaining(){return state.timer?(state.timer.endAt?Math.max(0,Math.ceil((state.timer.endAt-Date.now())/1000)):state.timer.remainingSec):timerPreset*60;}
 const timerString=n=>`${String(Math.floor(n/60)).padStart(2,'0')}:${String(n%60).padStart(2,'0')}`;
+const completedGames=()=>GAME_PROJECTS.filter(p=>state.gameChecks[p.id]===true).length;
+function renderGameChecklist(){
+  return `<section class="daily-checklist game-checklist" aria-label="TK 小游戏完成清单"><div class="section-title"><div><h2>我的小游戏 <span class="pill">TK</span></h2><p class="checklist-hint">完成后勾选，状态会一直保留；再次点击可取消。</p></div><span id="game-checklist-summary" role="status" aria-live="polite">已完成 ${completedGames()} / ${GAME_PROJECTS.length}</span></div><div class="checklist-grid">${GAME_PROJECTS.map(p=>{const checked=state.gameChecks[p.id]===true;return `<label class="checklist-row ${checked?'checked':''}"><input type="checkbox" data-game-check="${p.id}" aria-label="${p.name}" ${checked?'checked':''}><span class="checklist-copy"><strong>${p.name}</strong><small>平台 · ${p.platform}</small></span><span class="checklist-state">${checked?'已完成':'勾选完成'}</span></label>`;}).join('')}</div></section>`;
+}
 function renderProjects(){
   const t=state.timer;const active=!!t?.endAt;const today=day(localDate());
-  return titleBlock('让小想法，慢慢长出来','每次只推进一小步，也是在做自己的游戏。',`<button class="primary-button" data-action="task-add">${icon('plus')}添加一步</button>`)+
-  renderActionPeriod(true)+
-  `<div class="project-grid"><section><div class="panel"><div class="project-top"><div><div class="eyebrow">MY LITTLE PROJECT</div><h2 class="panel-title" style="margin:0">${esc(state.settings.projectName)}</h2></div><button class="text-button" data-action="project-edit">${icon('edit')}改名</button></div><p class="hint">把想做的功能，拆成一次能完成的小步骤。</p></div><div class="board">${[['doing','正在做'],['todo','下一小步'],['done','已经做好']].map(([status,label])=>{const tasks=state.tasks.filter(t=>t.status===status);return `<section class="board-group"><h3 class="board-label"><span>${label}</span><span>${tasks.length}</span></h3>${tasks.length?tasks.map(task=>`<div class="task-row ${status==='done'?'done':''}"><button class="text-button" data-action="task-edit" data-id="${esc(task.id)}" aria-label="编辑步骤：${esc(task.title)}">${icon(status==='done'?'check':'edit')}</button><span class="task-text">${esc(task.title)}</span><select data-task-status="${esc(task.id)}" aria-label="${esc(task.title)}的状态"><option value="todo" ${status==='todo'?'selected':''}>下一步</option><option value="doing" ${status==='doing'?'selected':''}>正在做</option><option value="done" ${status==='done'?'selected':''}>已完成</option></select><button class="icon-button" data-action="task-delete" data-id="${esc(task.id)}" aria-label="删除步骤：${esc(task.title)}">${icon('trash')}</button></div>`).join(''):`<p class="board-empty">${status==='doing'?'选一个小步骤就好。':status==='done'?'完成的步骤会留在这里。':'小到“画一个按钮”也可以。'}</p>`}</section>`;}).join('')}</div></section>
+  return titleBlock('小游戏，完成一件记一件','平台 TK · 按自己的节奏，逐个完成。')+
+  renderGameChecklist()+renderActionPeriod(true)+
+  `<details class="optional-records project-details" id="project-details" ${projectDetailsOpen?'open':''}><summary><span>步骤与专注（可选）<small>原有项目步骤和专注记录都在这里</small></span>${icon('right')}</summary><div class="project-details-body"><div class="project-details-actions"><button class="secondary-button" data-action="task-add">${icon('plus')}添加一步</button></div><div class="project-grid"><section><div class="panel"><div class="project-top"><div><div class="eyebrow">MY LITTLE PROJECT</div><h2 class="panel-title" style="margin:0">${esc(state.settings.projectName)}</h2></div><button class="text-button" data-action="project-edit">${icon('edit')}改名</button></div><p class="hint">把想做的功能，拆成一次能完成的小步骤。</p></div><div class="board">${[['doing','正在做'],['todo','下一小步'],['done','已经做好']].map(([status,label])=>{const tasks=state.tasks.filter(t=>t.status===status);return `<section class="board-group"><h3 class="board-label"><span>${label}</span><span>${tasks.length}</span></h3>${tasks.length?tasks.map(task=>`<div class="task-row ${status==='done'?'done':''}"><button class="text-button" data-action="task-edit" data-id="${esc(task.id)}" aria-label="编辑步骤：${esc(task.title)}">${icon(status==='done'?'check':'edit')}</button><span class="task-text">${esc(task.title)}</span><select data-task-status="${esc(task.id)}" aria-label="${esc(task.title)}的状态"><option value="todo" ${status==='todo'?'selected':''}>下一步</option><option value="doing" ${status==='doing'?'selected':''}>正在做</option><option value="done" ${status==='done'?'selected':''}>已完成</option></select><button class="icon-button" data-action="task-delete" data-id="${esc(task.id)}" aria-label="删除步骤：${esc(task.title)}">${icon('trash')}</button></div>`).join(''):`<p class="board-empty">${status==='doing'?'选一个小步骤就好。':status==='done'?'完成的步骤会留在这里。':'小到“画一个按钮”也可以。'}</p>`}</section>`;}).join('')}</div></section>
   <aside class="timer-panel"><div class="timer-label">${icon('leaf')} 给想法一点专注时间</div><div class="timer-value" id="timer-value" role="timer" aria-label="剩余时间">${timerString(timerRemaining())}</div><div class="timer-options">${[10,15,25].map(n=>`<button data-action="timer-preset" data-minutes="${n}" class="${(t?t.totalSec/60:timerPreset)===n?'active':''}" ${t?'disabled':''}>${n} 分钟</button>`).join('')}</div><div class="timer-controls"><button class="primary-button" data-action="timer-toggle">${icon(active?'pause':'play')}${active?'暂停':t?'继续':'开始专注'}</button>${t?'<button class="secondary-button" data-action="timer-finish">结束</button>':''}</div><p class="timer-foot">${t?'可以随时停下来，已专注的时间会记下。':'从一小段时间开始，跟着自己的节奏。'}<br>今天已专注 ${minutes(today)} 分钟</p></aside></div>
-  ${today.sessions.length?`<section class="panel" style="margin-top:22px"><h2 class="panel-title">今天的专注记录</h2>${today.sessions.slice().reverse().map(s=>`<div class="plan-row">${icon('clock')}<div>${esc(s.title||state.settings.projectName)}<small>${new Date(s.time).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}</small></div><span>${Math.floor(s.seconds/60)} 分 ${s.seconds%60} 秒</span></div>`).join('')}</section>`:''}`;
+  ${today.sessions.length?`<section class="panel" style="margin-top:22px"><h2 class="panel-title">今天的专注记录</h2>${today.sessions.slice().reverse().map(s=>`<div class="plan-row">${icon('clock')}<div>${esc(s.title||state.settings.projectName)}<small>${new Date(s.time).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}</small></div><span>${Math.floor(s.seconds/60)} 分 ${s.seconds%60} 秒</span></div>`).join('')}</section>`:''}</div></details>`;
 }
 function renderSettings(){return titleBlock('把这里，调成你的节奏','简单设置，照顾真实的自己。')+
-  `<div class="settings-grid"><section class="panel"><h2 class="panel-title">我的偏好</h2><p class="panel-description">所有目标都可以按自己的需要调整。</p><form id="preferences-form"><label class="field"><span>怎么称呼你</span><input name="name" maxlength="30" value="${esc(state.settings.name)}" placeholder="你的名字或昵称"></label><label class="field"><span>个人饮水参考目标（ml）</span><input name="waterGoal" type="number" min="0" max="10000" step="50" value="${state.settings.waterGoal}" inputmode="numeric"><small>填 0 只记录总量；这里的目标由你自己决定。</small></label><label class="field"><span>小游戏项目名称</span><input name="projectName" required maxlength="80" value="${esc(state.settings.projectName)}"></label><button class="primary-button" type="submit">${icon('check')}保存偏好</button></form></section>
+  `<div class="settings-grid"><section class="panel"><h2 class="panel-title">我的偏好</h2><p class="panel-description">所有目标都可以按自己的需要调整。</p><form id="preferences-form"><label class="field"><span>怎么称呼你</span><input name="name" maxlength="30" value="${esc(state.settings.name)}" placeholder="你的名字或昵称"></label><label class="field"><span>个人饮水参考目标（ml）</span><input name="waterGoal" type="number" min="0" max="10000" step="50" value="${state.settings.waterGoal}" inputmode="numeric"><small>填 0 只记录总量；这里的目标由你自己决定。</small></label><label class="field"><span>步骤与专注的项目名称</span><input name="projectName" required maxlength="80" value="${esc(state.settings.projectName)}"></label><button class="primary-button" type="submit">${icon('check')}保存偏好</button></form></section>
   <section class="panel"><div class="section-title"><h2>我的补剂安排</h2><button class="text-button" data-action="supplement-add">${icon('plus')}添加</button></div><p class="panel-description">记录已有的安排，不生成补剂或用量建议。</p><div class="plan-list">${supplementRows()}</div><div class="info-box">补剂名称和备注都由你填写。每天在「今日」页面点选已使用的项目，记录会按日期保存。</div></section>
   <section class="panel"><h2 class="panel-title">记录与备份</h2><p class="panel-description">生活记录保存在当前浏览器中。</p><div class="info-box">换设备、换浏览器或清除浏览器数据后，记录不会自动同步。可以先导出备份，再在新设备导入。</div><div class="settings-actions"><button class="secondary-button" data-action="export">${icon('download')}${storageBlocked?'导出原始备份':'导出备份'}</button><button class="secondary-button" data-action="import">${icon('upload')}导入备份</button><input type="file" id="import-file" accept=".json,application/json" hidden></div><p class="data-foot">已保存 ${Object.values(state.days).filter(hasRecord).length} 天的记录 · ${state.tasks.length} 个项目步骤<br>备份格式：JSON。导入前会确认，并提供现有数据备份。</p></section>
   <section class="panel"><h2 class="panel-title">一个轻一点的生活空间</h2><p class="panel-description">一天做好一件事，也可以很好。</p><p class="info-box">这里没有连续打卡排名，也没有必须填满的清单。按需记录，允许空白。让工具替你记住小事，把注意力留给生活。</p><p class="hint">手机使用：可以通过浏览器的「添加到主屏幕」把本站放在桌面。是否支持安装取决于浏览器。</p><p class="version-label">慢慢来 · 网页版 1.0</p></section></div>`;}
@@ -244,6 +254,12 @@ document.addEventListener('input',event=>{
 });
 document.addEventListener('change',async event=>{
   const el=event.target;
+  if(el.dataset.gameCheck){
+    const key=el.dataset.gameCheck;if(!GAME_PROJECTS.some(p=>p.id===key))return;
+    state.gameChecks[key]=el.checked;save();
+    const row=el.closest('.checklist-row');row.classList.toggle('checked',el.checked);row.querySelector('.checklist-state').textContent=el.checked?'已完成':'勾选完成';
+    document.querySelector('#game-checklist-summary').textContent=`已完成 ${completedGames()} / ${GAME_PROJECTS.length}`;return;
+  }
   if(el.dataset.dailyCheck){
     const key=el.dataset.dailyCheck;if(!CHECKLIST.some(x=>x.key===key))return;
     const d=day();d.checks[key]=el.checked;save();
@@ -274,7 +290,7 @@ document.addEventListener('submit',event=>{
 });
 dialog.addEventListener('click',event=>{if(event.target===dialog){const rect=dialog.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom){dialog.close();pendingConfirm=null;pendingImport=null;}}});
 dialog.addEventListener('cancel',()=>{pendingConfirm=null;pendingImport=null;});
-document.addEventListener('toggle',event=>{if(event.target.id==='optional-records')detailRecordsOpen=event.target.open;},true);
+document.addEventListener('toggle',event=>{if(event.target.id==='optional-records')detailRecordsOpen=event.target.open;if(event.target.id==='project-details')projectDetailsOpen=event.target.open;},true);
 window.addEventListener('hashchange',()=>{const next=location.hash.slice(1);if(navItems.some(x=>x[0]===next)&&next!==view){view=next;render();}});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden){refreshDailyDate();refreshActionPeriod();if(state.timer?.endAt&&timerRemaining()===0)finishTimer();}});
 setInterval(()=>{refreshDailyDate();refreshActionPeriod();if(state.timer?.endAt){const left=timerRemaining();const el=document.querySelector('#timer-value');if(el)el.textContent=timerString(left);if(left===0)finishTimer();}},1000);
