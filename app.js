@@ -87,7 +87,7 @@ function shiftMonth(month,delta){
   return `${Math.floor(index/12)}-${String(index%12+1).padStart(2,'0')}`;
 }
 const blankDay = () => ({checks:{},energy:null,focus:{text:'',done:false},water:[],meals:{breakfast:false,lunch:false,dinner:false},exercise:[],sleep:null,supplements:[],skin:{am:false,pm:false},note:'',sessions:[]});
-const blankState = () => ({version:1,settings:{name:'',waterGoal:0,projectName:'我的第一个小游戏'},gameChecks:{},goals:{room:false,trainerCertificate:false,publishedGames:0},expenses:[],supplementPlan:[],tasks:[],days:{},timer:null});
+const blankState = () => ({version:1,settings:{name:'',waterGoal:0,projectName:'我的第一个小游戏'},gameChecks:{},goals:{room:false,trainerCertificate:false,publishedGames:0},expenses:[],fixedExpenses:[],supplementPlan:[],tasks:[],days:{},timer:null});
 function validateState(raw){
   if(!raw || raw.version!==1 || typeof raw.days!=='object' || !raw.days || Array.isArray(raw.days)) throw new Error('不是慢慢来的有效备份文件');
   const s=blankState(); const text=(v,n=300)=>typeof v==='string'?v.slice(0,n):'';
@@ -99,6 +99,16 @@ function validateState(raw){
       if(!x||typeof x.id!=='string'||!x.id.trim()||x.id.length>100||expenseIds.has(x.id)||!validDate(x.date)||x.date<'2000-01-01'||x.date>'2099-12-31'||typeof x.title!=='string'||!x.title.trim()||x.title.length>80||!Number.isSafeInteger(x.amountCents)||x.amountCents<1||x.amountCents>MAX_EXPENSE_CENTS||!EXPENSE_CATEGORIES.some(c=>c.id===x.category)||(x.note!==undefined&&(typeof x.note!=='string'||x.note.length>300)))throw new Error('花销记录包含无效日期、金额或重复编号，请检查备份');
       if(x.frequency!==undefined&&!EXPENSE_FREQUENCIES.some(f=>f.id===x.frequency))throw new Error('花销记录包含无效的支出频率，请检查备份');
       expenseIds.add(x.id);return {id:x.id,date:x.date,title:x.title.trim(),amountCents:x.amountCents,category:x.category,frequency:x.frequency||'once',note:x.note||''};
+    });
+  }
+  if(raw.fixedExpenses!==undefined){
+    if(!Array.isArray(raw.fixedExpenses)||raw.fixedExpenses.length>MAX_EXPENSES)throw new Error('固定支出格式无效或超过 10000 项');
+    const ids=new Set(),sources=new Set();
+    s.fixedExpenses=raw.fixedExpenses.map(x=>{
+      if(!x||typeof x.id!=='string'||!x.id.trim()||x.id.length>100||ids.has(x.id)||typeof x.title!=='string'||!x.title.trim()||x.title.length>80||!Number.isSafeInteger(x.amountCents)||x.amountCents<1||x.amountCents>MAX_EXPENSE_CENTS||!['monthly','yearly'].includes(x.frequency)||typeof x.cancelled!=='boolean'||(x.note!==undefined&&(typeof x.note!=='string'||x.note.length>300)))throw new Error('固定支出包含无效金额、周期、状态或重复编号，请检查备份');
+      if(x.sourceExpenseId!==undefined&&(typeof x.sourceExpenseId!=='string'||!x.sourceExpenseId.trim()||x.sourceExpenseId.length>100||sources.has(x.sourceExpenseId)))throw new Error('固定支出包含无效或重复的旧记录来源，请检查备份');
+      ids.add(x.id);if(x.sourceExpenseId!==undefined)sources.add(x.sourceExpenseId);
+      return {id:x.id,title:x.title.trim(),amountCents:x.amountCents,frequency:x.frequency,cancelled:x.cancelled,note:x.note||'',...(x.sourceExpenseId!==undefined?{sourceExpenseId:x.sourceExpenseId}:{})};
     });
   }
   for(const {id} of GAME_PROJECTS){if(typeof raw.gameChecks?.[id]==='boolean')s.gameChecks[id]=raw.gameChecks[id];}
@@ -128,8 +138,7 @@ function validateState(raw){
 let state, storageBlocked=false, initialError='',rawBackup='';
 try{rawBackup=localStorage.getItem(STORAGE_KEY)||'';state=rawBackup?validateState(JSON.parse(rawBackup)):blankState();}catch(error){state=blankState();storageBlocked=true;initialError='无法读取本地记录。请先在设置中导出原始备份，再恢复数据。';}
 let selectedDate=localDate();
-let selectedExpenseMonth=localDate().slice(0,7);
-let expensePeriod='month';
+let legacyExpensesOpen=false,legacyExpenseLimit=20;
 let currentCalendarDate=localDate();
 let view=['today','history','projects','goals','expenses','settings'].includes(location.hash.slice(1))?location.hash.slice(1):'today';
 let timerPreset=15,toastTimeout,detailRecordsOpen=false,projectDetailsOpen=!!state.timer;
@@ -155,6 +164,7 @@ function refreshDailyDate(){
   const now=localDate();if(now===currentCalendarDate||dialog.open)return;
   const previous=currentCalendarDate;currentCalendarDate=now;
   if(selectedDate===previous){selectedDate=now;if(view==='today')render();}
+  if(view==='expenses')render();
 }
 function navigate(next){if(!navItems.some(x=>x[0]===next))return;view=next;location.hash=next;render();window.scrollTo({top:0,behavior:'instant'});}
 const dateControls=()=>`<div class="date-nav"><button data-action="date-prev" aria-label="前一天">${icon('left')}</button><input type="date" aria-label="记录日期" id="record-date" value="${selectedDate}" max="${localDate()}" min="2000-01-01"><button data-action="date-next" aria-label="后一天" ${selectedDate>=localDate()?'disabled':''}>${icon('right')}</button><button class="date-today" data-action="date-today">今天</button></div>`;
@@ -236,39 +246,80 @@ function expenseYearSummary(year){
   const rows=expensesForYear(year);
   return {totalCents:rows.reduce((sum,x)=>sum+x.amountCents,0),yearlyCents:rows.filter(x=>x.frequency==='yearly').reduce((sum,x)=>sum+x.amountCents,0),count:rows.length};
 }
-function renderExpenses(){
-  const isYear=expensePeriod==='year',[year,month]=selectedExpenseMonth.split('-');
-  const rows=isYear?expensesForYear(year):expensesForMonth(selectedExpenseMonth),total=rows.reduce((sum,x)=>sum+x.amountCents,0),annual=expenseYearSummary(year);
-  const label=isYear?`${year} 年`:`${year} 年 ${Number(month)} 月`,periodLabel=isYear?'这一年':'这个月';
-  const categories=EXPENSE_CATEGORIES.map(c=>({...c,total:rows.filter(x=>x.category===c.id).reduce((sum,x)=>sum+x.amountCents,0)})).filter(c=>c.total>0).sort((a,b)=>b.total-a.total);
-  return titleBlock('花出去的，轻轻记下来','日常开销、月费和年费，都可以记在这里。',`<button class="primary-button expense-add-button" data-action="expense-add">${icon('plus')}记一笔</button>`)+
-    `<section class="expense-overview" aria-label="${isYear?'年度':'月度'}花销汇总"><div class="expense-period-switch" role="group" aria-label="花销统计范围"><button data-action="expense-period" data-period="month" aria-pressed="${!isYear}">按月</button><button data-action="expense-period" data-period="year" aria-pressed="${isYear}">按年</button></div><div class="expense-month-controls"><button class="icon-button" data-action="expense-month-prev" aria-label="${isYear?'上一年':'上个月'}" ${(isYear?year==='2000':selectedExpenseMonth==='2000-01')?'disabled':''}>${icon('left')}</button>${isYear?`<label class="visually-hidden" for="expense-year">花销年份</label><input id="expense-year" type="number" inputmode="numeric" min="2000" max="2099" step="1" value="${year}" aria-describedby="expense-year-help"><span id="expense-year-help" class="visually-hidden">2000 至 2099 年</span>`:`<label class="visually-hidden" for="expense-month">花销月份</label><input id="expense-month" type="month" min="2000-01" max="2099-12" value="${selectedExpenseMonth}">`}<button class="icon-button" data-action="expense-month-next" aria-label="${isYear?'下一年':'下个月'}" ${(isYear?year==='2099':selectedExpenseMonth==='2099-12')?'disabled':''}>${icon('right')}</button><button class="text-button" data-action="expense-month-today">${isYear?'本年':'本月'}</button></div><div class="expense-total"><div><p>${label} · 已支付花销</p><strong aria-label="${isYear?'当年':'当月'}总花销">${formatMoney(total)}</strong></div><span>共 ${rows.length} 笔记录</span></div><div class="expense-year-summary">${!isYear?`<span>${year} 年合计 <strong>${formatMoney(annual.totalCents)}</strong></span>`:''}<span>全年年付项目已付 <strong>${formatMoney(annual.yearlyCents)}</strong></span></div></section>
-    <div class="expense-layout"><section class="panel expense-records" aria-label="花销明细"><div class="section-title"><h2>${periodLabel}的明细</h2><span>按日期排列</span></div>${rows.length?`<div class="expense-list">${rows.map(x=>`<article class="expense-row"><div class="expense-row-main"><div class="expense-row-heading"><h3>${esc(x.title)}</h3><strong>${formatMoney(x.amountCents)}</strong></div><p class="expense-meta"><time datetime="${x.date}">${x.date.replaceAll('-','/')}</time><span>${esc(EXPENSE_CATEGORIES.find(c=>c.id===x.category).name)}</span><span class="expense-frequency ${x.frequency==='yearly'?'yearly':''}">${EXPENSE_FREQUENCIES.find(f=>f.id===x.frequency)?.name||'单次 / 不固定'}</span></p>${x.note?`<p class="expense-note">${esc(x.note)}</p>`:''}</div><div class="expense-row-actions"><button class="icon-button" data-action="expense-edit" data-id="${esc(x.id)}" aria-label="编辑花销：${esc(x.title)}">${icon('edit')}</button><button class="icon-button" data-action="expense-delete" data-id="${esc(x.id)}" aria-label="删除花销：${esc(x.title)}">${icon('trash')}</button></div></article>`).join('')}</div>`:`<div class="empty-state">${icon('wallet')}<h3>${periodLabel}还没有记录</h3><p>房租、一顿饭、一笔年费，都可以记在这里。</p><button class="secondary-button" data-action="expense-add">${icon('plus')}记下第一笔</button></div>`}</section>
-    <aside class="panel expense-categories" aria-label="花销分类汇总"><h2 class="panel-title">花在哪里</h2>${categories.length?`<ul>${categories.map(c=>`<li><div><span>${c.name}</span><strong>${formatMoney(c.total)}</strong></div><progress value="${c.total}" max="${total}" aria-label="${c.name}，${formatMoney(c.total)}"></progress></li>`).join('')}</ul>`:'<p class="hint">记下花销后，这里会按分类汇总。</p>'}</aside></div><p class="expense-storage-note">按实际付款日期计入当月和当年，每次付款后记一笔。金额单位：人民币元。记录保存在当前浏览器，可在「设置」导出备份。</p>`;
+function fixedExpenseSummary(items=state.fixedExpenses){
+  const sum={monthlyCents:0,yearlyCents:0,nextYearCents:0,savedMonthlyCents:0,savedYearlyCents:0,savedNextYearCents:0,activeCount:0,cancelledCount:0};
+  for(const item of items){
+    if(item.cancelled){sum.cancelledCount++;sum[item.frequency==='monthly'?'savedMonthlyCents':'savedYearlyCents']+=item.amountCents;}
+    else{sum.activeCount++;sum[item.frequency==='monthly'?'monthlyCents':'yearlyCents']+=item.amountCents;}
+  }
+  sum.nextYearCents=sum.monthlyCents*12+sum.yearlyCents;
+  sum.savedNextYearCents=sum.savedMonthlyCents*12+sum.savedYearlyCents;
+  return sum;
 }
-function expenseDialog(id){
-  const record=id?state.expenses.find(x=>x.id===id):null;
-  if(id&&!record){toast('这笔花销已不存在');return;}
-  if(!record&&state.expenses.length>=MAX_EXPENSES){toast('花销已达 10000 笔，请先导出备份整理记录');return;}
-  const date=record?.date||(selectedExpenseMonth===localDate().slice(0,7)?localDate():selectedExpenseMonth+'-01');
-  openDialog(record?'编辑这笔花销':'记下一笔花销',`<form id="expense-form" data-id="${esc(record?.id||'')}"><p class="dialog-help">每次实际付款后记一笔，金额单位为人民币元。</p><label class="field"><span>花销项目</span><input name="title" required maxlength="80" value="${esc(record?.title||'')}" placeholder="例如：房租、晚饭、会员年费" autofocus></label><div class="field-row"><label class="field"><span>金额（元）</span><input name="amount" type="text" inputmode="decimal" required maxlength="12" value="${record?(record.amountCents/100).toFixed(2):''}" placeholder="0.00" autocomplete="off"></label><label class="field"><span>花销日期</span><input name="date" type="date" required min="2000-01-01" max="2099-12-31" value="${date}"></label></div><label class="field"><span>支出频率</span><select name="frequency" aria-describedby="expense-frequency-help">${EXPENSE_FREQUENCIES.map(f=>`<option value="${f.id}" ${(record?.frequency||'once')===f.id?'selected':''}>${f.name}</option>`).join('')}</select><small id="expense-frequency-help">年费选「每年一次」，填本次实际支付的全年金额。</small></label><label class="field"><span>分类</span><select name="category">${EXPENSE_CATEGORIES.map(c=>`<option value="${c.id}" ${(record?.category||'other')===c.id?'selected':''}>${c.name}</option>`).join('')}</select></label><label class="field"><span>备注（可选）</span><textarea name="note" maxlength="300" rows="2" placeholder="想补充的内容，可以留在这里">${esc(record?.note||'')}</textarea></label><p id="expense-error" class="expense-error" role="alert" hidden></p>${formActions('保存这笔花销')}</form>`);
+function fixedForecastLabels(today=localDate()){
+  const [year,month]=today.split('-').map(Number);
+  return {nextMonth:`${month===12?year+1:year} 年 ${month===12?1:month+1} 月`,nextYear:year+1};
+}
+function renderFixedSummary(){
+  const s=fixedExpenseSummary(),labels=fixedForecastLabels();
+  return `<article class="fixed-summary-card"><span>下个月月付预计</span><strong id="fixed-next-month">${formatMoney(s.monthlyCents)}</strong><p>${labels.nextMonth} · 仍在用的月付项目</p><small>已砍掉 ${formatMoney(s.savedMonthlyCents)} / 月</small></article>
+    <article class="fixed-summary-card main-summary"><span>明年固定支出预计</span><strong id="fixed-next-year">${formatMoney(s.nextYearCents)}</strong><p>${labels.nextYear} 年 · 按当前清单估算</p><small>月付 ${formatMoney(s.monthlyCents)} × 12 + 年付 ${formatMoney(s.yearlyCents)}</small></article>
+    <article class="fixed-summary-card saved-summary"><span>已砍掉的开销</span><strong id="fixed-saved-year">${formatMoney(s.savedNextYearCents)}<em>/ 年</em></strong><p>已取消 ${s.cancelledCount} 项 · 仍在用 ${s.activeCount} 项</p><small>按取消项目持续一年计算</small></article>`;
+}
+function fixedGroupStatus(frequency){
+  const items=state.fixedExpenses.filter(x=>x.frequency===frequency),active=items.filter(x=>!x.cancelled).length;
+  return `仍在用 ${active} 项 · 已取消 ${items.length-active} 项`;
+}
+function renderFixedGroup(frequency){
+  const monthly=frequency==='monthly',unit=monthly?'月':'年',items=state.fixedExpenses.filter(x=>x.frequency===frequency);
+  return `<section class="panel fixed-group" aria-label="${monthly?'每月':'每年'}固定支出"><div class="fixed-group-heading"><div><h2>${monthly?'每月':'每年'}固定支出</h2><p data-fixed-group-count="${frequency}">${fixedGroupStatus(frequency)}</p></div><button class="text-button" data-action="fixed-add" data-frequency="${frequency}">${icon('plus')}添加${monthly?'月付':'年付'}</button></div>${items.length?`<div class="fixed-items">${items.map(x=>`<article class="fixed-item ${x.cancelled?'cancelled':''}"><label class="fixed-item-check"><input type="checkbox" data-fixed-cancel="${esc(x.id)}" aria-label="已取消：${esc(x.title)}" ${x.cancelled?'checked':''}><span class="fixed-item-copy"><strong>${esc(x.title)}</strong><span class="fixed-item-amount">${formatMoney(x.amountCents)} <small>/ ${unit}</small></span><span class="fixed-cancel-text">${x.cancelled?'已取消 · 不计入预计花销':'仍在用 · 取消后勾选'}</span>${x.note?`<span class="fixed-item-note">${esc(x.note)}</span>`:''}</span></label><div class="fixed-item-actions"><button class="icon-button" data-action="fixed-edit" data-id="${esc(x.id)}" aria-label="编辑固定支出：${esc(x.title)}">${icon('edit')}</button><button class="icon-button" data-action="fixed-delete" data-id="${esc(x.id)}" aria-label="移除误录项目：${esc(x.title)}">${icon('trash')}</button></div></article>`).join('')}</div>`:`<div class="fixed-empty"><p>${monthly?'会员、房租、通讯费等，每月金额只填一次。':'公司报账、软件年费等，每年金额只填一次。'}</p></div>`}</section>`;
+}
+function renderLegacyExpenses(){
+  if(!state.expenses.length)return '';
+  const records=[...state.expenses].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,legacyExpenseLimit);
+  return `<details class="optional-records legacy-expenses" id="legacy-expenses" ${legacyExpensesOpen?'open':''}><summary><span>旧版记录（${state.expenses.length} 笔，已保留）<small>需要继续管理的项目，可以加入固定清单</small></span>${icon('right')}</summary><div class="legacy-expenses-body"><p class="hint">这里保留原先的付款记录。加入固定清单后，才会参与预计花销。</p>${records.map(x=>{const added=state.fixedExpenses.some(f=>f.sourceExpenseId===x.id);return `<article class="legacy-expense-row"><div><strong>${esc(x.title)}</strong><small>${x.date} · ${formatMoney(x.amountCents)} · ${EXPENSE_FREQUENCIES.find(f=>f.id===x.frequency)?.name||'单次 / 不固定'}</small>${x.note?`<p>${esc(x.note)}</p>`:''}</div><button class="secondary-button" data-action="fixed-from-legacy" data-id="${esc(x.id)}" ${added?'disabled':''}>${added?'已加入':'加入固定清单'}</button></article>`;}).join('')}${state.expenses.length>legacyExpenseLimit?`<button class="text-button" data-action="legacy-more">查看更多（已显示 ${records.length} / ${state.expenses.length}）</button>`:''}</div></details>`;
+}
+function renderExpenses(){
+  return titleBlock('固定支出，少一点也轻一点','把每月、每年会花的钱列出来，砍掉一项就勾选。',`<button class="primary-button expense-add-button" data-action="fixed-add">${icon('plus')}添加固定支出</button>`)+
+    `<section class="fixed-summary" id="fixed-summary" aria-label="固定支出预计" aria-live="polite">${renderFixedSummary()}</section><div class="fixed-help">勾选「已取消」后，这项费用会从未来预计中扣除；取消勾选可恢复。请在服务实际取消或公司注销后再勾选。</div><div class="fixed-groups">${renderFixedGroup('monthly')}${renderFixedGroup('yearly')}</div>${renderLegacyExpenses()}<p class="expense-storage-note">金额单位：人民币元。预计按当前金额和取消状态计算。记录保存在当前浏览器，可在「设置」导出备份。</p>`;
+}
+function fixedExpenseDialog(id,frequency='monthly',sourceId=''){
+  const record=id?state.fixedExpenses.find(x=>x.id===id):null,source=sourceId?state.expenses.find(x=>x.id===sourceId):null;
+  if(id&&!record){toast('这项固定支出已不存在');return;}
+  if(sourceId&&(!source||state.fixedExpenses.some(x=>x.sourceExpenseId===sourceId))){toast('这条旧记录已加入或已不存在');return;}
+  if(!record&&state.fixedExpenses.length>=MAX_EXPENSES){toast('固定支出已达 10000 项，请先导出备份整理');return;}
+  const values=record||source,period=record?.frequency||(source&&['monthly','yearly'].includes(source.frequency)?source.frequency:frequency);
+  openDialog(record?'编辑固定支出':'添加固定支出',`<form id="fixed-expense-form" data-id="${esc(record?.id||'')}" data-source-id="${esc(sourceId)}"><p class="dialog-help">月付填每月金额，年付填每年金额。每个项目只需记录一次。</p><label class="field"><span>支出项目</span><input name="title" required maxlength="80" value="${esc(values?.title||'')}" placeholder="例如：百度会员、公司报账" autofocus></label><div class="field-row"><label class="field"><span>固定金额（元）</span><input name="amount" type="text" inputmode="decimal" required maxlength="12" value="${values?(values.amountCents/100).toFixed(2):''}" placeholder="0.00" autocomplete="off"></label><label class="field"><span>付款周期</span><select name="frequency"><option value="monthly" ${period==='monthly'?'selected':''}>每月一次</option><option value="yearly" ${period==='yearly'?'selected':''}>每年一次</option></select></label></div><label class="field"><span>备注（可选）</span><textarea name="note" maxlength="300" rows="2" placeholder="例如：续费时间、准备取消的原因">${esc(values?.note||'')}</textarea></label><p class="dialog-help">实际取消后，在清单勾选「已取消」，预计花销会随之减少。</p><p id="fixed-expense-error" class="expense-error" role="alert" hidden></p>${formActions('保存固定支出')}</form>`);
 }
 function commitExpenses(next){const previous=state.expenses;state.expenses=next;if(save())return true;state.expenses=previous;return false;}
-function submitExpenseForm(form,get){
-  const error=document.querySelector('#expense-error'),fail=message=>{error.textContent=message;error.hidden=false;};
-  const amountCents=parseExpenseAmount(get('amount')),date=get('date'),title=get('title'),category=get('category'),frequency=get('frequency'),note=get('note'),id=form.dataset.id;
-  if(!title||title.length>80){fail('请填写花销项目，最多 80 个字');return;}
-  if(amountCents===null){fail('金额请填 0.01 到 999999.99，最多两位小数');return;}
-  if(!validDate(date)||date<'2000-01-01'||date>'2099-12-31'){fail('请选择 2000 至 2099 年的有效日期');return;}
-  if(!EXPENSE_CATEGORIES.some(c=>c.id===category)||note.length>300){fail('请检查分类和备注');return;}
-  if(!EXPENSE_FREQUENCIES.some(f=>f.id===frequency)){fail('请选择有效的支出频率');return;}
-  if(id&&!state.expenses.some(x=>x.id===id)){fail('这笔花销已不存在，请关闭后重新添加');return;}
-  if(!id&&state.expenses.length>=MAX_EXPENSES){fail('花销已达 10000 笔，请先导出备份整理记录');return;}
-  const record={id:id||uid(),date,title,amountCents,category,frequency,note};
-  const next=id?state.expenses.map(x=>x.id===id?record:x):[...state.expenses,record];
-  if(!commitExpenses(next)){fail('未能保存，填写的内容还在。请先到设置导出备份，再重试。');return;}
-  selectedExpenseMonth=date.slice(0,7);dialog.close();render();toast('这笔花销已保存');
+function commitFixedExpenses(next){const previous=state.fixedExpenses;state.fixedExpenses=next;if(save())return true;state.fixedExpenses=previous;return false;}
+function setFixedExpenseCancelled(id,cancelled){
+  if(typeof cancelled!=='boolean'||!state.fixedExpenses.some(x=>x.id===id))return false;
+  return commitFixedExpenses(state.fixedExpenses.map(x=>x.id===id?{...x,cancelled}:x));
 }
+function updateFixedExpenseDisplay(input){
+  const row=input.closest('.fixed-item');row.classList.toggle('cancelled',input.checked);
+  row.querySelector('.fixed-cancel-text').textContent=input.checked?'已取消 · 不计入预计花销':'仍在用 · 取消后勾选';
+  document.querySelector('#fixed-summary').innerHTML=renderFixedSummary();
+  document.querySelectorAll('[data-fixed-group-count]').forEach(el=>{el.textContent=fixedGroupStatus(el.dataset.fixedGroupCount);});
+}
+function submitFixedExpenseForm(form,get){
+  const error=document.querySelector('#fixed-expense-error'),fail=message=>{error.textContent=message;error.hidden=false;};
+  const title=get('title'),amountCents=parseExpenseAmount(get('amount')),frequency=get('frequency'),note=get('note'),id=form.dataset.id,sourceId=form.dataset.sourceId;
+  const previous=id?state.fixedExpenses.find(x=>x.id===id):null;
+  if(!title||title.length>80){fail('请填写支出项目，最多 80 个字');return;}
+  if(amountCents===null){fail('金额请填 0.01 到 999999.99，最多两位小数');return;}
+  if(!['monthly','yearly'].includes(frequency)||note.length>300){fail('请检查付款周期和备注');return;}
+  if(id&&!previous){fail('这项固定支出已不存在，请关闭后重新添加');return;}
+  if(!id&&state.fixedExpenses.length>=MAX_EXPENSES){fail('固定支出已达 10000 项，请先导出备份整理');return;}
+  if(sourceId&&(!state.expenses.some(x=>x.id===sourceId)||state.fixedExpenses.some(x=>x.sourceExpenseId===sourceId&&x.id!==id))){fail('这条旧记录已加入或已不存在');return;}
+  const source=previous?.sourceExpenseId||sourceId;
+  const record={id:id||uid(),title,amountCents,frequency,cancelled:previous?.cancelled||false,note,...(source?{sourceExpenseId:source}:{})};
+  const next=id?state.fixedExpenses.map(x=>x.id===id?record:x):[...state.fixedExpenses,record];
+  if(!commitFixedExpenses(next)){fail('未能保存，填写的内容还在。请先导出备份，再检查浏览器存储空间。');return;}
+  dialog.close();render();toast('固定支出已保存');
+}
+
 function renderHistory(){
   const dates=recentDays(),records=dates.map(k=>state.days[k]),count=records.filter(hasRecord).length,focus=records.filter(d=>d?.focus.done).length,total=records.reduce((a,d)=>a+(d?minutes(d):0),0),all=Object.keys(state.days).filter(k=>hasRecord(state.days[k])).sort().reverse();
   return titleBlock('回头看看，已经走了一点','每一笔记录，都是照顾自己的痕迹。')+
@@ -293,7 +344,7 @@ function renderProjects(){
 function renderSettings(){return titleBlock('把这里，调成你的节奏','简单设置，照顾真实的自己。')+
   `<div class="settings-grid"><section class="panel"><h2 class="panel-title">我的偏好</h2><p class="panel-description">所有目标都可以按自己的需要调整。</p><form id="preferences-form"><label class="field"><span>怎么称呼你</span><input name="name" maxlength="30" value="${esc(state.settings.name)}" placeholder="你的名字或昵称"></label><label class="field"><span>个人饮水参考目标（ml）</span><input name="waterGoal" type="number" min="0" max="10000" step="50" value="${state.settings.waterGoal}" inputmode="numeric"><small>填 0 只记录总量；这里的目标由你自己决定。</small></label><label class="field"><span>步骤与专注的项目名称</span><input name="projectName" required maxlength="80" value="${esc(state.settings.projectName)}"></label><button class="primary-button" type="submit">${icon('check')}保存偏好</button></form></section>
   <section class="panel"><div class="section-title"><h2>我的补剂安排</h2><button class="text-button" data-action="supplement-add">${icon('plus')}添加</button></div><p class="panel-description">记录已有的安排，不生成补剂或用量建议。</p><div class="plan-list">${supplementRows()}</div><div class="info-box">补剂名称和备注都由你填写。每天在「今日」页面点选已使用的项目，记录会按日期保存。</div></section>
-  <section class="panel"><h2 class="panel-title">记录与备份</h2><p class="panel-description">生活记录和花销保存在当前浏览器中。</p><div class="info-box">换设备、换浏览器或清除浏览器数据后，记录不会自动同步。可以先导出备份，再在新设备导入。</div><div class="settings-actions"><button class="secondary-button" data-action="export">${icon('download')}${storageBlocked?'导出原始备份':'导出备份'}</button><button class="secondary-button" data-action="import">${icon('upload')}导入备份</button><input type="file" id="import-file" accept=".json,application/json" hidden></div><p class="data-foot">已保存 ${Object.values(state.days).filter(hasRecord).length} 天的记录 · ${state.tasks.length} 个项目步骤 · ${state.expenses.length} 笔花销<br>备份格式：JSON。导入前会确认，并提供现有数据备份。</p></section>
+  <section class="panel"><h2 class="panel-title">记录与备份</h2><p class="panel-description">生活记录和花销保存在当前浏览器中。</p><div class="info-box">换设备、换浏览器或清除浏览器数据后，记录不会自动同步。可以先导出备份，再在新设备导入。</div><div class="settings-actions"><button class="secondary-button" data-action="export">${icon('download')}${storageBlocked?'导出原始备份':'导出备份'}</button><button class="secondary-button" data-action="import">${icon('upload')}导入备份</button><input type="file" id="import-file" accept=".json,application/json" hidden></div><p class="data-foot">已保存 ${Object.values(state.days).filter(hasRecord).length} 天的记录 · ${state.tasks.length} 个项目步骤 · ${state.fixedExpenses.length} 项固定支出 · ${state.expenses.length} 笔旧版花销<br>备份格式：JSON。导入前会确认，并提供现有数据备份。</p></section>
   <section class="panel"><h2 class="panel-title">一个轻一点的生活空间</h2><p class="panel-description">一天做好一件事，也可以很好。</p><p class="info-box">这里没有连续打卡排名，也没有必须填满的清单。按需记录，允许空白。让工具替你记住小事，把注意力留给生活。</p><p class="hint">手机使用：可以通过浏览器的「添加到主屏幕」把本站放在桌面。是否支持安装取决于浏览器。</p><p class="version-label">慢慢来 · 网页版 1.0</p></section></div>`;}
 function supplementRows(){return state.supplementPlan.length?state.supplementPlan.map(p=>`<div class="plan-row"><div>${esc(p.name)}${p.note?`<small>${esc(p.note)}</small>`:''}</div><button class="icon-button" data-action="supplement-edit" data-id="${esc(p.id)}" aria-label="编辑补剂 ${esc(p.name)}">${icon('edit')}</button><button class="icon-button" data-action="supplement-delete" data-id="${esc(p.id)}" aria-label="删除补剂 ${esc(p.name)}">${icon('trash')}</button></div>`).join(''):'<p class="hint">还没有添加补剂。有需要时再添加就好。</p>';}
 function openDialog(title,body){document.querySelector('#dialog-content').innerHTML=`<div class="dialog-inner"><div class="dialog-header"><h2 id="dialog-title">${esc(title)}</h2><button class="icon-button" data-action="dialog-close" aria-label="关闭">${icon('close')}</button></div>${body}</div>`;if(!dialog.open)dialog.showModal();}
@@ -311,16 +362,14 @@ function downloadBackup(){const contents=storageBlocked&&rawBackup?rawBackup:JSO
 document.addEventListener('click',event=>{
   const b=event.target.closest('[data-action]');if(!b||b.disabled)return;const action=b.dataset.action,id=b.dataset.id,key=b.dataset.key;const d=day();
   switch(action){
-    case 'expense-add':expenseDialog();return;
-    case 'expense-edit':expenseDialog(id);return;
-    case 'expense-delete':{
-      const record=state.expenses.find(x=>x.id===id);if(!record)return;
-      confirmAction('删除这笔花销？',`${record.date} · ${record.title} · ${formatMoney(record.amountCents)}。删除后会重新计算花销汇总。`,()=>{if(commitExpenses(state.expenses.filter(x=>x.id!==id))){render();toast('这笔花销已删除');}});return;
+    case 'fixed-add':fixedExpenseDialog(null,b.dataset.frequency||'monthly');return;
+    case 'fixed-edit':fixedExpenseDialog(id);return;
+    case 'fixed-from-legacy':fixedExpenseDialog(null,'monthly',id);return;
+    case 'legacy-more':legacyExpenseLimit+=20;legacyExpensesOpen=true;render();return;
+    case 'fixed-delete':{
+      const item=state.fixedExpenses.find(x=>x.id===id);if(!item)return;
+      confirmAction('移除这个误录项目？',`${item.title} · ${formatMoney(item.amountCents)} / ${item.frequency==='monthly'?'月':'年'}。如果只是取消了服务，勾选「已取消」即可保留削减记录。移除会从清单和统计中去掉这一项。`,()=>{if(commitFixedExpenses(state.fixedExpenses.filter(x=>x.id!==id))){render();toast('已移除这个项目');}},'确认移除');return;
     }
-    case 'expense-period':if(['month','year'].includes(b.dataset.period)){expensePeriod=b.dataset.period;render();}return;
-    case 'expense-month-prev':selectedExpenseMonth=shiftMonth(selectedExpenseMonth,expensePeriod==='year'?-12:-1);render();return;
-    case 'expense-month-next':selectedExpenseMonth=shiftMonth(selectedExpenseMonth,expensePeriod==='year'?12:1);render();return;
-    case 'expense-month-today':selectedExpenseMonth=localDate().slice(0,7);render();return;
     case 'goal-count-down':setPublishedGames(state.goals.publishedGames-1);return;
     case 'goal-count-up':setPublishedGames(state.goals.publishedGames+1);return;
     case 'nav':navigate(b.dataset.view);return;
@@ -377,8 +426,11 @@ document.addEventListener('input',event=>{
 });
 document.addEventListener('change',async event=>{
   const el=event.target;
-  if(el.id==='expense-month'){if(validMonth(el.value)){selectedExpenseMonth=el.value;render();}else{el.value=selectedExpenseMonth;toast('请选择 2000 至 2099 年的有效月份');}return;}
-  if(el.id==='expense-year'){if(validMonth(el.value+'-01')){selectedExpenseMonth=el.value+selectedExpenseMonth.slice(4);render();}else{el.value=selectedExpenseMonth.slice(0,4);toast('请选择 2000 至 2099 年的有效年份');}return;}
+  if(el.dataset.fixedCancel){
+    const record=state.fixedExpenses.find(x=>x.id===el.dataset.fixedCancel);if(!record)return;
+    if(!setFixedExpenseCancelled(record.id,el.checked)){el.checked=record.cancelled;return;}
+    updateFixedExpenseDisplay(el);toast(el.checked?'已取消，未来预计花销已减少':'已恢复计入预计花销');return;
+  }
   if(el.dataset.goalCheck){
     const key=el.dataset.goalCheck;if(!PERSONAL_GOALS.some(g=>g.id===key))return;
     state.goals[key]=el.checked;save();
@@ -401,13 +453,13 @@ document.addEventListener('change',async event=>{
   if(el.dataset.taskStatus){const task=state.tasks.find(x=>x.id===el.dataset.taskStatus);if(task){if(task.status!=='done'&&el.value==='done')day(localDate()).checks.game=true;task.status=el.value;save();render();}}
   if(el.id==='import-file'){
     const file=el.files[0];el.value='';if(!file)return;
-    try{if(file.size>25*1024*1024)throw new Error('文件超过 25 MB，请选择较小的备份');pendingImport=validateState(JSON.parse(await file.text()));openDialog('恢复这份备份？',`<p class="dialog-help">文件：${esc(file.name)}<br>包含 ${Object.values(pendingImport.days).filter(hasRecord).length} 天记录、${pendingImport.tasks.length} 个项目步骤、${pendingImport.expenses.length} 笔花销，目标进度也会一并恢复。</p><div class="info-box">导入会替换当前设备的记录，专注计时会停止。点击恢复时会先下载一份现有数据备份。</div><div class="dialog-actions"><button class="secondary-button" data-action="dialog-close">取消</button><button class="primary-button" data-action="import-apply">备份现有数据并恢复</button></div>`);}catch(error){pendingImport=null;toast('未导入：'+(error instanceof SyntaxError?'文件不是有效的 JSON 备份':error.message));}
+    try{if(file.size>25*1024*1024)throw new Error('文件超过 25 MB，请选择较小的备份');pendingImport=validateState(JSON.parse(await file.text()));openDialog('恢复这份备份？',`<p class="dialog-help">文件：${esc(file.name)}<br>包含 ${Object.values(pendingImport.days).filter(hasRecord).length} 天记录、${pendingImport.tasks.length} 个项目步骤、${pendingImport.fixedExpenses.length} 项固定支出、${pendingImport.expenses.length} 笔旧版花销，目标进度也会一并恢复。</p><div class="info-box">导入会替换当前设备的记录，专注计时会停止。点击恢复时会先下载一份现有数据备份。</div><div class="dialog-actions"><button class="secondary-button" data-action="dialog-close">取消</button><button class="primary-button" data-action="import-apply">备份现有数据并恢复</button></div>`);}catch(error){pendingImport=null;toast('未导入：'+(error instanceof SyntaxError?'文件不是有效的 JSON 备份':error.message));}
   }
 });
 document.addEventListener('submit',event=>{
   const f=event.target;if(!f.id.endsWith('-form'))return;event.preventDefault();const data=new FormData(f),get=k=>String(data.get(k)||'').trim();const d=day();
   switch(f.id){
-    case 'expense-form':submitExpenseForm(f,get);return;
+    case 'fixed-expense-form':submitFixedExpenseForm(f,get);return;
     case 'focus-form':{const value=get('text');if(!value)return;d.focus={text:value,done:value===d.focus.text?d.focus.done:false};break;}
     case 'water-form':{const ml=+get('ml');if(!Number.isInteger(ml)||ml<1||ml>3000)return;d.water.push({id:uid(),ml,time:new Date().toISOString()});d.checks.water=true;break;}
     case 'exercise-form':{const n=+get('minutes');if(!get('type')||!Number.isInteger(n)||n<1||n>720)return;d.exercise.push({id:uid(),type:get('type'),minutes:n});d.checks.exercise=true;break;}
@@ -422,7 +474,7 @@ document.addEventListener('submit',event=>{
 });
 dialog.addEventListener('click',event=>{if(event.target===dialog){const rect=dialog.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom){dialog.close();pendingConfirm=null;pendingImport=null;}}});
 dialog.addEventListener('cancel',()=>{pendingConfirm=null;pendingImport=null;});
-document.addEventListener('toggle',event=>{if(event.target.id==='optional-records')detailRecordsOpen=event.target.open;if(event.target.id==='project-details')projectDetailsOpen=event.target.open;},true);
+document.addEventListener('toggle',event=>{if(event.target.id==='optional-records')detailRecordsOpen=event.target.open;if(event.target.id==='project-details')projectDetailsOpen=event.target.open;if(event.target.id==='legacy-expenses')legacyExpensesOpen=event.target.open;},true);
 window.addEventListener('hashchange',()=>{const next=location.hash.slice(1);if(navItems.some(x=>x[0]===next)&&next!==view){view=next;render();}});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden){refreshDailyDate();refreshActionPeriod();if(state.timer?.endAt&&timerRemaining()===0)finishTimer();}});
 setInterval(()=>{refreshDailyDate();refreshActionPeriod();if(state.timer?.endAt){const left=timerRemaining();const el=document.querySelector('#timer-value');if(el)el.textContent=timerString(left);if(left===0)finishTimer();}},1000);
