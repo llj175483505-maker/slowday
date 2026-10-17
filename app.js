@@ -53,7 +53,7 @@ function actionPeriodStatus(today=localDate()){
 const CHECKLIST = [
   {key:'exercise',icon:'exercise',name:'健身',hint:'运动、散步或拉伸，动过就记一笔'},
   {key:'meals',icon:'meal',name:'吃饭',hint:'好好吃过一餐，也是在照顾自己'},
-  {key:'sleep',icon:'moon',name:'睡觉',hint:'给身体留过休息的时间'},
+  {key:'sleep',icon:'moon',name:'9点睡觉',hint:'晚上9点睡觉，完成后勾选'},
   {key:'supplements',icon:'pill',name:'补剂',hint:'按已有安排使用了再勾选，无需每天必选'},
   {key:'skin',icon:'skin',name:'护肤',hint:'完成了自己的护肤步骤'},
   {key:'water',icon:'water',name:'喝水',hint:'记得喝过水，就轻轻勾一下'},
