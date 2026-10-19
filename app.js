@@ -71,7 +71,8 @@ const CHECKLIST = [
   {key:'supplements',icon:'pill',name:'补剂',hint:'按已有安排使用了再勾选，无需每天必选'},
   {key:'skin',icon:'skin',name:'护肤',hint:'完成了自己的护肤步骤'},
   {key:'water',icon:'water',name:'喝水',hint:'记得喝过水，就轻轻勾一下'},
-  {key:'game',icon:'game',name:'开发小游戏',hint:'推进了一小步，就算做过'}
+  {key:'game',icon:'game',name:'开发小游戏',hint:'推进了一小步，就算做过'},
+  {key:'abstinence',icon:'leaf',name:'戒色',hint:'今天做到了，就勾一下。'}
 ];
 function parseExpenseAmount(input){
   if(typeof input!=='string'||!/^\d+(?:\.\d{1,2})?$/.test(input.trim()))return null;
@@ -231,7 +232,7 @@ const totalWater=d=>d.water.reduce((s,x)=>s+x.ml,0);
 const minutes=d=>Math.round(d.sessions.reduce((s,x)=>s+x.seconds,0)/60);
 const sleepHours=s=>{if(!s)return 0;const t=v=>v.split(':').reduce((h,m)=>+h*60+(+m));return ((t(s.wake)-t(s.bed)+1440)%1440)/60;};
 function inferredChecks(d){return {exercise:!!d?.exercise?.length,meals:Object.values(d?.meals||{}).some(Boolean),sleep:!!d?.sleep,supplements:!!d?.supplements?.length,skin:Object.values(d?.skin||{}).some(Boolean),water:!!d?.water?.length,game:!!d?.sessions?.length};}
-function isChecked(d,key){return typeof d?.checks?.[key]==='boolean'?d.checks[key]:inferredChecks(d)[key];}
+function isChecked(d,key){return typeof d?.checks?.[key]==='boolean'?d.checks[key]:inferredChecks(d)[key]===true;}
 const entryCount=d=>d?CHECKLIST.filter(x=>isChecked(d,x.key)).length:0;
 const hasRecord=d=>d&&(entryCount(d)>0||Object.values(inferredChecks(d)).some(Boolean)||d.energy||d.focus.text||d.focus.done||d.note);
 function renderChecklist(d){
